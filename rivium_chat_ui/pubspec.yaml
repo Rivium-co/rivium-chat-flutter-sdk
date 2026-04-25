@@ -1,0 +1,25 @@
+name: rivium_chat_ui
+description: Pre-built UI widgets for RiviumChat SDK. Ready-to-use chat screens, message bubbles, and more.
+version: 0.1.0
+homepage: https://rivium.co/cloud/rivium-chat
+repository: https://github.com/Rivium-co/rivium-chat-flutter-sdk
+
+environment:
+  sdk: ^3.8.1
+  flutter: '>=3.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  rivium_chat:
+    path: ../rivium_chat_core
+  cached_network_image: ^3.4.1
+  url_launcher: ^6.2.5
+  image_picker: ^1.0.7
+  file_picker: ^8.0.0
+  emoji_picker_flutter: ^4.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0

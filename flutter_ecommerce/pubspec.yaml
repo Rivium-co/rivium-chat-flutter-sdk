@@ -16,7 +16,7 @@ dependencies:
     path: ../rivium_chat_core
   rivium_chat_ui:
     path: ../rivium_chat_ui
-  rivium_push: ^0.1.2
+  rivium_push: ^0.1.13
 
   # UI dependencies
   cached_network_image: ^3.4.1

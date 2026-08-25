@@ -34,6 +34,8 @@ class RealtimeService {
   final _subscriptionStateController =
       StreamController<SubscriptionStateEvent>.broadcast();
   final _recoveryFailedController = StreamController<String>.broadcast();
+  final _parseErrorController =
+      StreamController<RealtimeParseError>.broadcast();
 
   /// Stream of incoming messages.
   Stream<Message> get onMessage => _messageController.stream;
@@ -68,6 +70,12 @@ class RealtimeService {
 
   /// Stream of recovery failures (room IDs that need full refresh).
   Stream<String> get onRecoveryFailed => _recoveryFailedController.stream;
+
+  /// Stream of realtime frames that arrived but couldn't be parsed or
+  /// dispatched. Prior to 0.1.1 these were silently swallowed, which
+  /// masked "missing message" bugs. Wire this to your telemetry to
+  /// catch schema drift between server and client.
+  Stream<RealtimeParseError> get onParseError => _parseErrorController.stream;
 
   RealtimeService(this._config, this._getToken);
 
@@ -246,14 +254,27 @@ class RealtimeService {
     });
 
     sub.publication.listen((event) {
+      // Decode step: a decode failure means the frame is truly garbage
+      // (rare — Centrifugo speaks binary-safe JSON). Report it and
+      // move on.
+      Map<String, dynamic>? data;
       try {
-        final data = jsonDecode(utf8.decode(event.data)) as Map<String, dynamic>?;
-        if (data != null) {
-          onPublication?.call(data);
-        }
-      } catch (e) {
-        // Ignore malformed publications
+        data = jsonDecode(utf8.decode(event.data)) as Map<String, dynamic>?;
+      } catch (e, st) {
+        _parseErrorController.add(RealtimeParseError(
+          channel: channel,
+          roomId: roomId,
+          error: e,
+          stackTrace: st,
+        ));
+        return;
       }
+      if (data == null || onPublication == null) return;
+      // Dispatch step: keep this OUTSIDE the decode try so a per-event
+      // parse failure in `_handleChatEvent` doesn't get confused with a
+      // JSON decode error. `_handleChatEvent` catches per-case and
+      // reports through the same `_parseErrorController`.
+      onPublication(data);
     });
 
     if (onJoin != null) {
@@ -283,65 +304,80 @@ class RealtimeService {
     final eventType = data['event'] as String? ?? data['type'] as String?;
     final payload = data['data'] as Map<String, dynamic>? ?? data;
 
-    switch (eventType) {
-      case 'message':
-        _messageController.add(Message.fromJson(payload));
-        break;
-      case 'read':
-        _readReceiptController.add(ReadReceipt.fromJson(payload));
-        break;
-      case 'deleted':
-        _deletionController.add(MessageDeletion.fromJson(payload));
-        break;
-      case 'message_edited':
-        _editController.add(MessageEditEvent(
-          messageId: payload['messageId'] as String,
-          roomId: payload['roomId'] as String? ?? roomId,
-          content: payload['content'] as String,
-          editedBy: payload['editedBy'] as String,
-          editedAt: DateTime.parse(payload['editedAt'] as String),
-        ));
-        break;
-      case 'reaction_added':
-        _reactionController.add(ReactionEvent(
-          messageId: payload['messageId'] as String,
-          roomId: payload['roomId'] as String? ?? roomId,
-          userId: payload['userId'] as String,
-          emoji: payload['emoji'] as String,
-          added: true,
-          reactionId: payload['reactionId'] as String?,
-        ));
-        break;
-      case 'reaction_removed':
-        _reactionController.add(ReactionEvent(
-          messageId: payload['messageId'] as String,
-          roomId: payload['roomId'] as String? ?? roomId,
-          userId: payload['userId'] as String,
-          emoji: payload['emoji'] as String,
-          added: false,
-        ));
-        break;
-      case 'message_pinned':
-        _pinController.add(MessagePinEvent(
-          messageId: payload['messageId'] as String,
-          roomId: payload['roomId'] as String? ?? roomId,
-          userId: payload['pinnedBy'] as String,
-          pinned: true,
-        ));
-        break;
-      case 'message_unpinned':
-        _pinController.add(MessagePinEvent(
-          messageId: payload['messageId'] as String,
-          roomId: payload['roomId'] as String? ?? roomId,
-          userId: payload['unpinnedBy'] as String,
-          pinned: false,
-        ));
-        break;
-      default:
-        // Try parsing as a direct message if no type specified
-        if (payload.containsKey('id') && payload.containsKey('content')) {
+    // Every case wraps the dispatch in its own try. A schema drift on
+    // one event type (e.g. server adds a required field to `message`)
+    // must NOT break the entire subscription lane — that was the
+    // pre-0.1.1 behavior which silently dropped realtime frames.
+    try {
+      switch (eventType) {
+        case 'message':
           _messageController.add(Message.fromJson(payload));
-        }
+          break;
+        case 'read':
+          _readReceiptController.add(ReadReceipt.fromJson(payload));
+          break;
+        case 'deleted':
+          _deletionController.add(MessageDeletion.fromJson(payload));
+          break;
+        case 'message_edited':
+          _editController.add(MessageEditEvent(
+            messageId: payload['messageId'] as String,
+            roomId: payload['roomId'] as String? ?? roomId,
+            content: payload['content'] as String,
+            editedBy: payload['editedBy'] as String,
+            editedAt: DateTime.parse(payload['editedAt'] as String),
+          ));
+          break;
+        case 'reaction_added':
+          _reactionController.add(ReactionEvent(
+            messageId: payload['messageId'] as String,
+            roomId: payload['roomId'] as String? ?? roomId,
+            userId: payload['userId'] as String,
+            emoji: payload['emoji'] as String,
+            added: true,
+            reactionId: payload['reactionId'] as String?,
+          ));
+          break;
+        case 'reaction_removed':
+          _reactionController.add(ReactionEvent(
+            messageId: payload['messageId'] as String,
+            roomId: payload['roomId'] as String? ?? roomId,
+            userId: payload['userId'] as String,
+            emoji: payload['emoji'] as String,
+            added: false,
+          ));
+          break;
+        case 'message_pinned':
+          _pinController.add(MessagePinEvent(
+            messageId: payload['messageId'] as String,
+            roomId: payload['roomId'] as String? ?? roomId,
+            userId: payload['pinnedBy'] as String,
+            pinned: true,
+          ));
+          break;
+        case 'message_unpinned':
+          _pinController.add(MessagePinEvent(
+            messageId: payload['messageId'] as String,
+            roomId: payload['roomId'] as String? ?? roomId,
+            userId: payload['unpinnedBy'] as String,
+            pinned: false,
+          ));
+          break;
+        default:
+          // Try parsing as a direct message if no type specified
+          if (payload.containsKey('id') && payload.containsKey('content')) {
+            _messageController.add(Message.fromJson(payload));
+          }
+      }
+    } catch (e, st) {
+      _parseErrorController.add(RealtimeParseError(
+        channel: 'chat:room_$roomId',
+        roomId: roomId,
+        eventType: eventType,
+        payload: payload,
+        error: e,
+        stackTrace: st,
+      ));
     }
   }
 
@@ -448,5 +484,6 @@ class RealtimeService {
     _errorController.close();
     _subscriptionStateController.close();
     _recoveryFailedController.close();
+    _parseErrorController.close();
   }
 }

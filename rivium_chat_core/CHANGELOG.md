@@ -1,3 +1,8 @@
+## [0.1.1] - 2026-08-03
+
+- Fixed silent drop of realtime frames when a payload failed to parse.
+- Added `RiviumChatClient.onParseError` for observing parse failures.
+
 ## [0.1.0] - 2026-04-26
 
 - Initial release

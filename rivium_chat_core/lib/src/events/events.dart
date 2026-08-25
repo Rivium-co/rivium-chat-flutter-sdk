@@ -222,3 +222,37 @@ class PresenceEvent {
     required this.isOnline,
   });
 }
+
+/// Emitted when a realtime frame arrives but the SDK can't parse or
+/// dispatch it. Historically these were swallowed silently, which made
+/// intermittent "missing message" bugs impossible to diagnose. Wire this
+/// to your observability layer (RiviumTrace, Sentry, etc.) so a bad
+/// wire payload surfaces instead of vanishing.
+///
+/// [channel] is the Centrifugo channel the frame came in on (e.g.
+/// `chat:room_<uuid>`). [eventType] is the parsed `event`/`type` field
+/// from the payload — `null` when decode itself failed. [payload] is
+/// the raw decoded JSON when available. [error] and [stackTrace] are
+/// the caught exception details.
+class RealtimeParseError {
+  final String channel;
+  final String? roomId;
+  final String? eventType;
+  final Map<String, dynamic>? payload;
+  final Object error;
+  final StackTrace stackTrace;
+
+  const RealtimeParseError({
+    required this.channel,
+    this.roomId,
+    this.eventType,
+    this.payload,
+    required this.error,
+    required this.stackTrace,
+  });
+
+  @override
+  String toString() =>
+      'RealtimeParseError(channel=$channel, eventType=$eventType, '
+      'error=$error)';
+}

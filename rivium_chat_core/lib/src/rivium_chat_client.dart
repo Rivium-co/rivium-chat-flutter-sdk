@@ -100,6 +100,12 @@ class RiviumChatClient {
   /// Stream of recovery failures (room IDs that need full message refresh).
   Stream<String> get onRecoveryFailed => _realtime.onRecoveryFailed;
 
+  /// Stream of realtime frames the SDK couldn't decode or dispatch. Wire
+  /// this to your observability layer to catch server↔client schema
+  /// drift instead of silently dropping messages (which is what happened
+  /// prior to 0.1.1).
+  Stream<RealtimeParseError> get onParseError => _realtime.onParseError;
+
   // ============ Room Subscriptions ============
 
   /// Subscribes to realtime events for a room.

@@ -1,6 +1,6 @@
 name: rivium_chat
 description: Flutter SDK for RiviumChat — headless chat-as-a-service powered by Centrifugo. Use with any state management.
-version: 0.1.1
+version: 0.1.2
 homepage: https://rivium.co/cloud/rivium-chat
 repository: https://github.com/Rivium-co/rivium-chat-flutter-sdk
 

@@ -13,6 +13,31 @@ class RealtimeService {
   centrifuge.Client? _client;
   final Map<String, centrifuge.Subscription> _subscriptions = {};
 
+  /// Channels that have reached the `subscribed` state. A channel present in
+  /// [_subscriptions] but absent here was created but never confirmed by the
+  /// server — it must not be treated as usable.
+  final Set<String> _subscribedChannels = {};
+
+  /// Serialises operations per channel.
+  ///
+  /// Subscribe and unsubscribe both hand the channel name back and forth with
+  /// Centrifuge's internal registry. Interleaving them — which happens
+  /// constantly on mobile, where a screen leaves a room and rejoins it across
+  /// a lifecycle event without awaiting — leaves the two registries
+  /// disagreeing and throws "Subscription to a channel already exists".
+  /// Every mutation for a channel queues behind the previous one.
+  final Map<String, Future<void>> _channelOps = {};
+
+  /// Runs [action] after any in-flight operation for [channel] completes.
+  Future<T> _lockChannel<T>(String channel, Future<T> Function() action) {
+    final previous = _channelOps[channel] ?? Future<void>.value();
+    final result = previous.then((_) => action());
+    // Keep the chain alive even when a link fails, or one error would wedge
+    // the channel permanently.
+    _channelOps[channel] = result.then((_) {}, onError: (_) {});
+    return result;
+  }
+
   // Connection state
   final _connectionStateController =
       StreamController<ConnectionState>.broadcast();
@@ -77,7 +102,21 @@ class RealtimeService {
   /// catch schema drift between server and client.
   Stream<RealtimeParseError> get onParseError => _parseErrorController.stream;
 
-  RealtimeService(this._config, this._getToken);
+  /// Builds the Centrifuge client. Overridable so tests can drive the
+  /// subscribe/unsubscribe lifecycle without a server.
+  final centrifuge.Client Function(String url, centrifuge.ClientConfig config)?
+      clientFactory;
+
+  /// How long to wait for the server to confirm a subscribe before treating
+  /// it as failed.
+  final Duration subscribeTimeout;
+
+  RealtimeService(
+    this._config,
+    this._getToken, {
+    this.clientFactory,
+    this.subscribeTimeout = const Duration(seconds: 10),
+  });
 
   void _updateState(ConnectionState state) {
     _currentState = state;
@@ -93,7 +132,7 @@ class RealtimeService {
     try {
       final token = await _getToken();
 
-      _client = centrifuge.createClient(
+      _client = (clientFactory ?? centrifuge.createClient)(
         RiviumChatConfig.centrifugoUrl,
         centrifuge.ClientConfig(
           token: token,
@@ -134,14 +173,31 @@ class RealtimeService {
   Future<void> disconnect() async {
     if (_client == null) return;
 
-    for (final sub in _subscriptions.values) {
-      await sub.unsubscribe();
+    // Free every channel in Centrifuge's registry as well as our own map.
+    // Dropping only our map left the names held by the client, so every
+    // channel threw "already exists" on the next subscribe — for the life of
+    // the process.
+    for (final channel in _subscriptions.keys.toList()) {
+      await _teardownChannel(channel);
     }
     _subscriptions.clear();
+    _subscribedChannels.clear();
+    _channelOps.clear();
 
     await _client!.disconnect();
     _client = null;
     _updateState(ConnectionState.disconnected);
+  }
+
+  /// Drops the current connection and opens a new one.
+  ///
+  /// [connect] is a no-op while a client object exists, which leaves a host
+  /// with no way to recover a socket it believes is stale — a common state
+  /// after a long background on mobile. This tears the client down first, so
+  /// reconnecting is always possible.
+  Future<void> reconnect() async {
+    await disconnect();
+    await connect();
   }
 
   /// Subscribes to a room's channels.
@@ -150,17 +206,21 @@ class RealtimeService {
       throw StateError('Not connected. Call connect() first.');
     }
 
-    // Subscribe to chat channel (messages, read receipts, etc.)
-    await _subscribeToChannel(
+    // Each channel is subscribed independently. Sequential awaits meant a
+    // failure on the chat channel skipped presence and typing entirely, and a
+    // failure on any of them discarded the ones that had already succeeded.
+    final results = await Future.wait([
+      // Subscribe to chat channel (messages, read receipts, etc.)
+      _subscribeToChannel(
       'chat:room_$roomId',
       roomId,
       recoverable: true,
       onPublication: (data) => _handleChatEvent(roomId, data),
       onRecoveryFailed: () => _recoveryFailedController.add(roomId),
-    );
+      ).then<Object?>((_) => null, onError: (Object e) => e),
 
-    // Subscribe to presence channel
-    await _subscribeToChannel(
+      // Subscribe to presence channel
+      _subscribeToChannel(
       'presence:room_$roomId',
       roomId,
       onJoin: (userId) => _presenceController.add(PresenceEvent(
@@ -173,10 +233,10 @@ class RealtimeService {
         userId: userId,
         isOnline: false,
       )),
-    );
+      ).then<Object?>((_) => null, onError: (Object e) => e),
 
-    // Subscribe to typing channel
-    await _subscribeToChannel(
+      // Subscribe to typing channel
+      _subscribeToChannel(
       'typing:room_$roomId',
       roomId,
       onPublication: (data) {
@@ -189,8 +249,34 @@ class RealtimeService {
           ));
         }
       },
-    );
+      ).then<Object?>((_) => null, onError: (Object e) => e),
+    ]);
+
+    // Surface a failure only after every channel has had its turn, so a
+    // partial subscription keeps whatever succeeded.
+    final failures = results.whereType<Object>().toList();
+    if (failures.isNotEmpty) {
+      throw StateError(
+        'subscribeRoom($roomId) failed on ${failures.length} of 3 channels: '
+        '${failures.map((e) => e.toString()).join('; ')}',
+      );
+    }
   }
+
+  /// Whether every channel for [roomId] is currently subscribed.
+  ///
+  /// Lets a host detect the "opened but realtime-dead" state that previously
+  /// had no signal at all.
+  bool isRoomSubscribed(String roomId) =>
+      _subscribedChannels.contains('chat:room_$roomId') &&
+      _subscribedChannels.contains('presence:room_$roomId') &&
+      _subscribedChannels.contains('typing:room_$roomId');
+
+  /// Channels of [roomId] that are currently subscribed.
+  Set<String> subscribedChannelsFor(String roomId) => {
+        for (final c in ['chat', 'presence', 'typing'])
+          if (_subscribedChannels.contains('$c:room_$roomId')) '$c:room_$roomId',
+      };
 
   Future<void> _subscribeToChannel(
     String channel,
@@ -201,7 +287,48 @@ class RealtimeService {
     void Function(String userId)? onLeave,
     void Function()? onRecoveryFailed,
   }) async {
-    if (_subscriptions.containsKey(channel)) return;
+    return _lockChannel(channel, () => _subscribeToChannelLocked(
+          channel,
+          roomId,
+          recoverable: recoverable,
+          onPublication: onPublication,
+          onJoin: onJoin,
+          onLeave: onLeave,
+          onRecoveryFailed: onRecoveryFailed,
+        ));
+  }
+
+  Future<void> _subscribeToChannelLocked(
+    String channel,
+    String roomId, {
+    bool recoverable = false,
+    void Function(Map<String, dynamic>)? onPublication,
+    void Function(String userId)? onJoin,
+    void Function(String userId)? onLeave,
+    void Function()? onRecoveryFailed,
+  }) async {
+    // Already live — nothing to do.
+    if (_subscribedChannels.contains(channel)) return;
+
+    // A subscription object exists but never reached `subscribed`: a previous
+    // attempt was rejected or dropped. Returning here is what made
+    // subscribeRoom report success while the channel stayed dead, so tear the
+    // stale object down and build a fresh one instead.
+    final stale = _subscriptions.remove(channel);
+    if (stale != null) {
+      _client?.removeSubscription(stale);
+      try {
+        await stale.unsubscribe();
+      } catch (_) {
+        // Already gone; the registry removal above is what matters.
+      }
+    }
+
+    // Resolved by the `subscribed` listener, rejected by the `error` one.
+    // `subscribe()` returns as soon as the request is dispatched, so without
+    // waiting on a real outcome the caller is told "subscribed" for a channel
+    // the server went on to reject.
+    final outcome = Completer<void>();
 
     final sub = _client!.newSubscription(
       channel,
@@ -220,6 +347,8 @@ class RealtimeService {
     });
 
     sub.subscribed.listen((event) {
+      _subscribedChannels.add(channel);
+      if (!outcome.isCompleted) outcome.complete();
       _subscriptionStateController.add(SubscriptionStateEvent(
         roomId: roomId,
         channel: channel,
@@ -244,6 +373,7 @@ class RealtimeService {
     });
 
     sub.unsubscribed.listen((event) {
+      _subscribedChannels.remove(channel);
       _subscriptionStateController.add(SubscriptionStateEvent(
         roomId: roomId,
         channel: channel,
@@ -295,8 +425,40 @@ class RealtimeService {
       });
     }
 
+    // A rejected subscribe surfaces here and nowhere else. Without this
+    // listener the channel stayed silently dead and every later
+    // subscribeRoom() returned "success" without sending anything.
+    sub.error.listen((event) {
+      _subscribedChannels.remove(channel);
+      if (!outcome.isCompleted) {
+        outcome.completeError(
+          StateError('subscribe to $channel failed: ${event.error}'),
+        );
+      }
+      _subscriptionStateController.add(SubscriptionStateEvent(
+        roomId: roomId,
+        channel: channel,
+        status: SubscriptionStatus.error,
+        reason: event.error.toString(),
+      ));
+      _errorController.add(
+        ConnectionErrorEvent(error: 'Subscription failed on $channel: ${event.error}'),
+      );
+    });
+
     _subscriptions[channel] = sub;
     await sub.subscribe();
+
+    try {
+      await outcome.future.timeout(subscribeTimeout);
+    } catch (e) {
+      // Leave nothing half-registered: drop the dead subscription so a retry
+      // builds a fresh one rather than hitting the "already subscribed" path.
+      _subscriptions.remove(channel);
+      _subscribedChannels.remove(channel);
+      _client?.removeSubscription(sub);
+      rethrow;
+    }
   }
 
   void _handleChatEvent(String roomId, Map<String, dynamic> data) {
@@ -397,6 +559,30 @@ class RealtimeService {
     );
   }
 
+  /// Tears one channel down.
+  ///
+  /// The Centrifuge registry is cleared **before** awaiting `unsubscribe()`.
+  /// The old order — remove from our map, await the network round-trip, then
+  /// free the Centrifuge entry — left a window in which our map said "free"
+  /// while Centrifuge still held the name, so a re-subscribe arriving in that
+  /// window threw "Subscription to a channel already exists". On iOS the
+  /// window is wide, because backgrounding suspends the socket and the
+  /// unsubscribe round-trip cannot complete.
+  Future<void> _teardownChannel(String channel) async {
+    final sub = _subscriptions.remove(channel);
+    _subscribedChannels.remove(channel);
+    if (sub == null) return;
+
+    // Free the name first, so the channel is immediately re-subscribable.
+    _client?.removeSubscription(sub);
+    try {
+      await sub.unsubscribe();
+    } catch (_) {
+      // The socket may already be gone. The registry removal above is the
+      // part that must not be skipped.
+    }
+  }
+
   /// Unsubscribes from a room's channels.
   Future<void> unsubscribeRoom(String roomId) async {
     final channels = [
@@ -405,15 +591,10 @@ class RealtimeService {
       'typing:room_$roomId',
     ];
 
-    for (final channel in channels) {
-      final sub = _subscriptions.remove(channel);
-      if (sub != null) {
-        await sub.unsubscribe();
-        // Also remove from Centrifuge client's internal registry
-        // to allow re-subscribing later
-        _client?.removeSubscription(sub);
-      }
-    }
+    await Future.wait([
+      for (final channel in channels)
+        _lockChannel(channel, () => _teardownChannel(channel)),
+    ]);
   }
 
   /// Leave presence and typing channels but keep chat channel for unread updates.
@@ -423,13 +604,10 @@ class RealtimeService {
       'typing:room_$roomId',
     ];
 
-    for (final channel in channels) {
-      final sub = _subscriptions.remove(channel);
-      if (sub != null) {
-        await sub.unsubscribe();
-        _client?.removeSubscription(sub);
-      }
-    }
+    await Future.wait([
+      for (final channel in channels)
+        _lockChannel(channel, () => _teardownChannel(channel)),
+    ]);
   }
 
   /// Gets currently online users in a room.

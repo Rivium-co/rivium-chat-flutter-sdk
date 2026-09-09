@@ -31,4 +31,8 @@ enum SubscriptionStatus {
   subscribing,
   subscribed,
   unsubscribed,
+
+  /// The server rejected the subscribe, or it failed in transit. The channel
+  /// is not receiving anything; the host should retry or surface it.
+  error,
 }

@@ -35,7 +35,15 @@ class RiviumChatConfig {
   static const String baseUrl = 'https://chat.rivium.co';
 
   /// WebSocket URL for Centrifugo connection.
-  static const String centrifugoUrl = 'wss://ws-chat.rivium.co/connection/websocket';
+  static const String centrifugoUrl =
+      'wss://ws-chat.rivium.co/connection/websocket';
+
+  /// Timeout for REST calls.
+  ///
+  /// Without this Dio inherits the platform default, which on iOS is long
+  /// enough that a request issued while the app is backgrounding hangs
+  /// instead of failing.
+  final Duration httpTimeout;
 
   /// API key for authentication.
   final String apiKey;
@@ -54,6 +62,7 @@ class RiviumChatConfig {
     required this.userId,
     this.userInfo,
     this.fileUploader,
+    this.httpTimeout = const Duration(seconds: 15),
   });
 
   /// Creates a copy with modified fields.
@@ -62,12 +71,14 @@ class RiviumChatConfig {
     String? userId,
     Map<String, dynamic>? userInfo,
     FileUploader? fileUploader,
+    Duration? httpTimeout,
   }) {
     return RiviumChatConfig(
       apiKey: apiKey ?? this.apiKey,
       userId: userId ?? this.userId,
       userInfo: userInfo ?? this.userInfo,
       fileUploader: fileUploader ?? this.fileUploader,
+      httpTimeout: httpTimeout ?? this.httpTimeout,
     );
   }
 }

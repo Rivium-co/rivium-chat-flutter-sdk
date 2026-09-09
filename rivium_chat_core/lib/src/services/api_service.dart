@@ -10,6 +10,12 @@ class ApiService {
   ApiService(this._config) {
     _dio = Dio(BaseOptions(
       baseUrl: RiviumChatConfig.baseUrl,
+      // Without explicit timeouts Dio waits on the platform default, which is
+      // long enough that a call issued while the app is backgrounding hangs
+      // rather than failing.
+      connectTimeout: _config.httpTimeout,
+      sendTimeout: _config.httpTimeout,
+      receiveTimeout: _config.httpTimeout,
       headers: {
         'x-api-key': _config.apiKey,
         'Content-Type': 'application/json',

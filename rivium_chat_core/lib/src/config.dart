@@ -29,6 +29,13 @@ class FileUploadResult {
 /// Implement this to integrate with your storage service (S3, Firebase, Supabase, etc.).
 typedef FileUploader = Future<FileUploadResult> Function(File file);
 
+/// Returns a user token for the current user, issued by your server.
+///
+/// Your server calls `POST https://chat.rivium.co/api/v1/users/token` with the
+/// `x-server-secret` header and returns the `token` to the app. Never put the
+/// server secret in the app.
+typedef ChatTokenProvider = Future<String> Function();
+
 /// Configuration for the RiviumChat SDK.
 class RiviumChatConfig {
   /// Base URL for the RiviumChat REST API.
@@ -57,11 +64,23 @@ class RiviumChatConfig {
   /// Optional file uploader callback for sending attachments.
   final FileUploader? fileUploader;
 
+  /// Recommended. Proves who the user is: every request carries a token your
+  /// server issued, so nobody holding the public [apiKey] can act as another
+  /// user. The SDK calls it on connect, shortly before the token expires, and
+  /// when the server reports an expired token — refreshes are invisible to
+  /// the user. [userInfo] is ignored when set: your server passes it when it
+  /// issues the token.
+  ///
+  /// Without it the SDK uses the legacy mode (API key + [userId]), which a
+  /// project can disable in Rivium Console.
+  final ChatTokenProvider? tokenProvider;
+
   const RiviumChatConfig({
     required this.apiKey,
     required this.userId,
     this.userInfo,
     this.fileUploader,
+    this.tokenProvider,
     this.httpTimeout = const Duration(seconds: 15),
   });
 
@@ -71,6 +90,7 @@ class RiviumChatConfig {
     String? userId,
     Map<String, dynamic>? userInfo,
     FileUploader? fileUploader,
+    ChatTokenProvider? tokenProvider,
     Duration? httpTimeout,
   }) {
     return RiviumChatConfig(
@@ -78,6 +98,7 @@ class RiviumChatConfig {
       userId: userId ?? this.userId,
       userInfo: userInfo ?? this.userInfo,
       fileUploader: fileUploader ?? this.fileUploader,
+      tokenProvider: tokenProvider ?? this.tokenProvider,
       httpTimeout: httpTimeout ?? this.httpTimeout,
     );
   }

@@ -1,3 +1,8 @@
+## [0.1.3] - 2026-09-11
+
+- Added: `tokenProvider` for secure user identity. Tokens are refreshed automatically before they expire and after an expired-token response.
+- Added: `onAuthError` stream for identity errors a refresh cannot fix.
+
 ## [0.1.2] - 2026-09-09
 
 - Fixed: subscribing to a room could throw "Subscription to a channel already exists" after leaving and rejoining it.

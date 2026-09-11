@@ -1,13 +1,27 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import '../config.dart';
+import '../events/events.dart';
 import '../models/models.dart';
+import 'token_manager.dart';
 
 /// REST API service for RiviumChat backend.
 class ApiService {
   final RiviumChatConfig _config;
+  final TokenManager? _tokens;
+  final void Function(AuthErrorEvent)? _onAuthError;
   late final Dio _dio;
 
-  ApiService(this._config) {
+  static const _userTokenHeader = 'x-user-token';
+  static const _retriedKey = 'rivium_token_retried';
+
+  ApiService(
+    this._config, {
+    TokenManager? tokens,
+    void Function(AuthErrorEvent)? onAuthError,
+    @visibleForTesting HttpClientAdapter? httpClientAdapter,
+  })  : _tokens = tokens,
+        _onAuthError = onAuthError {
     _dio = Dio(BaseOptions(
       baseUrl: RiviumChatConfig.baseUrl,
       // Without explicit timeouts Dio waits on the platform default, which is
@@ -21,6 +35,67 @@ class ApiService {
         'Content-Type': 'application/json',
       },
     ));
+    if (httpClientAdapter != null) _dio.httpClientAdapter = httpClientAdapter;
+    if (_tokens != null) _dio.interceptors.add(_tokenInterceptor(_tokens));
+  }
+
+  /// Attaches the user token and handles its expiry, so callers never see a
+  /// token error they could not act on.
+  InterceptorsWrapper _tokenInterceptor(TokenManager tokens) {
+    return InterceptorsWrapper(
+      onRequest: (options, handler) async {
+        try {
+          options.headers[_userTokenHeader] = await tokens.get();
+          handler.next(options);
+        } catch (e) {
+          _reportAuthError('token_provider_failed', 'tokenProvider failed', e);
+          handler.reject(DioException(requestOptions: options, error: e));
+        }
+      },
+      onError: (error, handler) async {
+        final code = _authErrorCode(error.response);
+        if (code == null) return handler.next(error);
+
+        final options = error.requestOptions;
+        // An expired token is routine: fetch a new one and replay the request
+        // once. The user never sees it.
+        if (code == 'token_expired' && options.extra[_retriedKey] != true) {
+          try {
+            options.headers[_userTokenHeader] = await tokens.refresh();
+            options.extra[_retriedKey] = true;
+            return handler.resolve(await _dio.fetch(options));
+          } on DioException catch (retryError) {
+            // The replay went through this interceptor too and has already
+            // reported any identity error; just pass the failure on.
+            return handler.next(retryError);
+          } catch (e) {
+            _reportAuthError('token_provider_failed', 'tokenProvider failed', e);
+            return handler.next(error);
+          }
+        }
+
+        _reportAuthError(code, _message(error.response), error);
+        handler.next(error);
+      },
+    );
+  }
+
+  /// The identity error code of a 401, if the response is one.
+  static String? _authErrorCode(Response? response) {
+    if (response?.statusCode != 401) return null;
+    final data = response?.data;
+    final code = data is Map ? data['code'] : null;
+    return code is String && code.startsWith('token_') ? code : null;
+  }
+
+  static String _message(Response? response) {
+    final data = response?.data;
+    final message = data is Map ? data['message'] : null;
+    return message is String ? message : 'Authentication failed';
+  }
+
+  void _reportAuthError(String code, String message, Object? error) {
+    _onAuthError?.call(AuthErrorEvent(code: code, message: message, error: error));
   }
 
   // ============ Room Methods ============

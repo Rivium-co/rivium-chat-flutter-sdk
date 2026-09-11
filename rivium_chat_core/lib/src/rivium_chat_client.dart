@@ -4,6 +4,7 @@ import 'models/models.dart';
 import 'events/events.dart';
 import 'services/api_service.dart';
 import 'services/realtime_service.dart';
+import 'services/token_manager.dart';
 
 /// Main client for the RiviumChat SDK.
 ///
@@ -29,13 +30,32 @@ class RiviumChatClient {
 
   bool _isDisposed = false;
 
+  final _authErrors = StreamController<AuthErrorEvent>.broadcast();
+  TokenManager? _tokens;
+
   RiviumChatClient(this.config) {
-    _api = ApiService(config);
+    final provider = config.tokenProvider;
+    final tokens = provider == null ? null : TokenManager(provider);
+    _tokens = tokens;
+    _api = ApiService(config, tokens: tokens, onAuthError: _emitAuthError);
     _realtime = RealtimeService(
       config,
-      () => _api.getCentrifugoToken(config.userId, info: config.userInfo),
+      // With a tokenProvider the same user token authenticates REST and the
+      // realtime connection; centrifuge asks again before it expires.
+      tokens != null
+          ? tokens.get
+          : () => _api.getCentrifugoToken(config.userId, info: config.userInfo),
     );
   }
+
+  void _emitAuthError(AuthErrorEvent event) {
+    if (!_authErrors.isClosed) _authErrors.add(event);
+  }
+
+  /// Identity errors a token refresh cannot fix (revoked or invalid token,
+  /// project requires a token, tokenProvider failing). Send the user to
+  /// login. Only emitted when [RiviumChatConfig.tokenProvider] is set.
+  Stream<AuthErrorEvent> get onAuthError => _authErrors.stream;
 
   // ============ Connection ============
 
@@ -378,5 +398,7 @@ class RiviumChatClient {
     _isDisposed = true;
     _realtime.dispose();
     _api.dispose();
+    _tokens?.clear();
+    _authErrors.close();
   }
 }

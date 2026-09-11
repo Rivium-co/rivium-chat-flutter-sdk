@@ -256,3 +256,21 @@ class RealtimeParseError {
       'RealtimeParseError(channel=$channel, eventType=$eventType, '
       'error=$error)';
 }
+
+/// The server refused the user's identity and a token refresh cannot fix it:
+/// the token was revoked or invalid, the project requires a token, or your
+/// [RiviumChatConfig.tokenProvider] failed. Typically: send the user to login.
+///
+/// `code` is the server's reason (`token_revoked`, `token_invalid`,
+/// `token_required`, `token_expired` after a failed refresh) or
+/// `token_provider_failed`.
+class AuthErrorEvent {
+  final String code;
+  final String message;
+  final Object? error;
+
+  const AuthErrorEvent({required this.code, required this.message, this.error});
+
+  @override
+  String toString() => 'AuthErrorEvent($code: $message)';
+}

@@ -43,7 +43,7 @@ import 'package:rivium_chat/rivium_chat.dart';
 import 'package:rivium_chat_ui/rivium_chat_ui.dart';
 
 final client = RiviumChatClient(
-  config: RiviumChatConfig(
+  RiviumChatConfig(
     apiKey: 'your_api_key',
     userId: 'user-123',
     userInfo: {'displayName': 'John'},
@@ -52,6 +52,36 @@ final client = RiviumChatClient(
 
 await client.connect();
 ```
+
+### Secure user identity (recommended)
+
+Your API key ships inside the app, so on its own it cannot prove who the user
+is. Add a `tokenProvider` that asks **your server** for a user token:
+
+```dart
+final client = RiviumChatClient(
+  RiviumChatConfig(
+    apiKey: 'your_api_key',
+    userId: 'user-123',
+    tokenProvider: () => myBackend.getChatToken(), // returns the token string
+  ),
+);
+
+client.onAuthError.listen((e) => signOut()); // revoked or invalid token
+```
+
+Your server gets the token with its server secret (never put it in the app):
+
+```http
+POST https://chat.rivium.co/api/v1/users/token
+x-api-key: your_api_key
+x-server-secret: your_server_secret
+
+{ "userId": "user-123" }
+```
+
+Tokens last 1 hour. The SDK refreshes them before they expire and retries a
+request once if the server reports an expired token, so users never notice.
 
 ### 2. Create or Join a Room
 

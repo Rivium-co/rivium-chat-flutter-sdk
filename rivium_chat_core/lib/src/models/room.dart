@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'message.dart';
 import 'participant.dart';
 import 'enums.dart';
 
@@ -14,6 +15,16 @@ class Room {
   final DateTime? updatedAt;
   final List<Participant> participants;
 
+  /// The most recent message in the room, or null when there are none.
+  ///
+  /// Sent by `GET /rooms`, so a chat list can show a preview without asking
+  /// for each room's messages.
+  final Message? lastMessage;
+
+  /// Messages from other people that arrived after this user last read the
+  /// room. Sent by `GET /rooms`; 0 when everything has been read.
+  final int unreadCount;
+
   const Room({
     required this.id,
     this.type = RoomType.direct,
@@ -24,6 +35,8 @@ class Room {
     this.createdAt,
     this.updatedAt,
     this.participants = const [],
+    this.lastMessage,
+    this.unreadCount = 0,
   });
 
   factory Room.fromJson(Map<String, dynamic> json) {
@@ -44,6 +57,10 @@ class Room {
               ?.map((e) => Participant.fromJson(e as Map<String, dynamic>))
               .toList() ??
           [],
+      lastMessage: json['lastMessage'] != null
+          ? Message.fromJson(json['lastMessage'] as Map<String, dynamic>)
+          : null,
+      unreadCount: (json['unreadCount'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -69,6 +86,8 @@ class Room {
       if (createdAt != null) 'createdAt': createdAt!.toIso8601String(),
       if (updatedAt != null) 'updatedAt': updatedAt!.toIso8601String(),
       'participants': participants.map((e) => e.toJson()).toList(),
+      if (lastMessage != null) 'lastMessage': lastMessage!.toJson(),
+      'unreadCount': unreadCount,
     };
   }
 
@@ -82,6 +101,8 @@ class Room {
     DateTime? createdAt,
     DateTime? updatedAt,
     List<Participant>? participants,
+    Message? lastMessage,
+    int? unreadCount,
   }) {
     return Room(
       id: id ?? this.id,
@@ -93,6 +114,8 @@ class Room {
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       participants: participants ?? this.participants,
+      lastMessage: lastMessage ?? this.lastMessage,
+      unreadCount: unreadCount ?? this.unreadCount,
     );
   }
 
@@ -108,7 +131,9 @@ class Room {
         other.isActive == isActive &&
         other.createdAt == createdAt &&
         other.updatedAt == updatedAt &&
-        listEquals(other.participants, participants);
+        listEquals(other.participants, participants) &&
+        other.lastMessage == lastMessage &&
+        other.unreadCount == unreadCount;
   }
 
   @override
@@ -122,10 +147,12 @@ class Room {
         createdAt,
         updatedAt,
         Object.hashAll(participants),
+        lastMessage,
+        unreadCount,
       );
 
   @override
   String toString() {
-    return 'Room(id: $id, type: $type, externalId: $externalId, name: $name, metadata: $metadata, isActive: $isActive, createdAt: $createdAt, updatedAt: $updatedAt, participants: $participants)';
+    return 'Room(id: $id, type: $type, externalId: $externalId, name: $name, metadata: $metadata, isActive: $isActive, createdAt: $createdAt, updatedAt: $updatedAt, participants: $participants, lastMessage: $lastMessage, unreadCount: $unreadCount)';
   }
 }

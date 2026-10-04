@@ -1,3 +1,7 @@
+## [0.1.5] - 2026-10-05
+
+- Added: requests send an `X-Rivium-SDK` header (`flutter/<version>`); `riviumChatSdkName` and `riviumChatSdkVersion` are exported.
+
 ## [0.1.4] - 2026-09-26
 
 - Added: `lastMessage` and `unreadCount` on `Room`. A chat list can show the

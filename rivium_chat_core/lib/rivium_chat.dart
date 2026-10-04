@@ -39,6 +39,9 @@ library rivium_chat;
 // Config
 export 'src/config.dart';
 
+// SDK identity
+export 'src/version.dart' show riviumChatSdkName, riviumChatSdkVersion;
+
 // Client
 export 'src/rivium_chat_client.dart';
 

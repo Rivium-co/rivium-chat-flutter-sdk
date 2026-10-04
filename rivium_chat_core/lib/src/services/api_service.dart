@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import '../config.dart';
 import '../events/events.dart';
 import '../models/models.dart';
+import '../version.dart';
 import 'token_manager.dart';
 
 /// REST API service for RiviumChat backend.
@@ -33,6 +34,7 @@ class ApiService {
       headers: {
         'x-api-key': _config.apiKey,
         'Content-Type': 'application/json',
+        riviumChatSdkHeader: riviumChatSdkHeaderValue,
       },
     ));
     if (httpClientAdapter != null) _dio.httpClientAdapter = httpClientAdapter;

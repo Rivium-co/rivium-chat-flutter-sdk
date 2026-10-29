@@ -47,7 +47,7 @@
 ## [0.1.0] - 2026-04-26
 
 - Initial release
-- Real-time messaging via Centrifugo WebSocket
+- Real-time messaging over WebSocket
 - Room management (create, find, list)
 - Message operations (send, edit, delete, search)
 - Read receipts and unread counts

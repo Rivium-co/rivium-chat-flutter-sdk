@@ -63,10 +63,10 @@ class RiviumChatClient {
     _realtime = RealtimeService(
       config,
       // With a tokenProvider the same user token authenticates REST and the
-      // realtime connection; centrifuge asks again before it expires.
+      // realtime connection; the realtime client asks again before it expires.
       tokens != null
           ? () => _realtimeToken(tokens)
-          : () => _api.getCentrifugoToken(config.userId, info: config.userInfo),
+          : () => _api.getRealtimeToken(config.userId, info: config.userInfo),
     );
     if (config.queueOfflineMessages) {
       final outbox = Outbox(

@@ -412,11 +412,12 @@ class ApiService {
     return online.map((e) => e as String).toSet();
   }
 
-  /// Gets a Centrifugo connection token.
-  Future<String> getCentrifugoToken(
+  /// Gets a realtime connection token.
+  Future<String> getRealtimeToken(
     String userId, {
     Map<String, dynamic>? info,
   }) async {
+    // Chat API route that issues the realtime connection token.
     final response = await _dio.post('/api/v1/centrifugo/token', data: {
       'userId': userId,
       if (info != null) 'info': info,

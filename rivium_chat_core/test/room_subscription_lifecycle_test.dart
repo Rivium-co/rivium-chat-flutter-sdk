@@ -5,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rivium_chat/rivium_chat.dart';
 import 'package:rivium_chat/src/services/realtime_service.dart';
 
-/// A stand-in for Centrifuge's client that keeps the one rule that matters
+/// A stand-in for the realtime client that keeps the one rule that matters
 /// here: a channel name may be registered only once at a time, and
 /// `newSubscription` throws while it is taken. That is the exact behaviour
 /// behind the production crash.
@@ -20,7 +20,7 @@ class _FakeClient implements centrifuge.Client {
   /// Channels the "server" should reject, to simulate a failed subscribe.
   final Set<String> rejectChannels = {};
 
-  /// Channels the server refuses for good (code, reason), as Centrifugo does
+  /// Channels the server refuses for good (code, reason), as a real server does
   /// for a user who is not a participant of the room.
   final Map<String, (int, String)> refuseChannels = {};
 
@@ -28,7 +28,7 @@ class _FakeClient implements centrifuge.Client {
 
   int newSubscriptionCalls = 0;
 
-  /// The socket closes while the unsubscribe is in flight: Centrifuge then
+  /// The socket closes while the unsubscribe is in flight: the realtime client then
   /// fails it with the error *type* `ClientDisconnectedError` (not an
   /// instance), as its transport does on close.
   bool removeFailsDisconnected = false;
@@ -79,7 +79,7 @@ class _FakeClient implements centrifuge.Client {
 
   @override
   Future<void> disconnect() async {
-    // Like Centrifuge: the disconnected event is emitted while disconnect()
+    // Like the realtime client: the disconnected event is emitted while disconnect()
     // runs, after any await the caller did before it.
     await Future<void>.delayed(Duration.zero);
     _disconnected.add(centrifuge.DisconnectedEvent(0, 'disconnect called'));
@@ -122,7 +122,7 @@ class _FakeSubscription implements centrifuge.Subscription {
   Future<void> subscribe() async {
     final refusal = _client.refuseChannels[channel];
     if (refusal != null) {
-      // Like Centrifuge on a permanent subscribe error: the error event,
+      // Like the realtime client on a permanent subscribe error: the error event,
       // then the subscription ends with the server's code and reason.
       final (code, reason) = refusal;
       _error.add(centrifuge.SubscriptionErrorEvent(centrifuge
@@ -131,7 +131,7 @@ class _FakeSubscription implements centrifuge.Subscription {
       return;
     }
     if (_client.rejectChannels.contains(channel)) {
-      // Centrifuge reports a rejected subscribe on the error stream; it does
+      // The realtime client reports a rejected subscribe on the error stream; it does
       // not throw out of subscribe().
       _error.add(centrifuge.SubscriptionErrorEvent(Exception('rejected')));
       return;

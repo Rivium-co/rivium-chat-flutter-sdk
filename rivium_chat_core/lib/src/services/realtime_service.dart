@@ -5,7 +5,7 @@ import '../config.dart';
 import '../models/models.dart';
 import '../events/events.dart';
 
-/// Real-time messaging service using Centrifugo WebSocket.
+/// Real-time messaging service over a WebSocket connection.
 class RealtimeService {
   final RiviumChatConfig _config;
   final Future<String> Function() _getToken;
@@ -21,7 +21,7 @@ class RealtimeService {
   /// Serialises operations per channel.
   ///
   /// Subscribe and unsubscribe both hand the channel name back and forth with
-  /// Centrifuge's internal registry. Interleaving them — which happens
+  /// the realtime client's internal registry. Interleaving them — which happens
   /// constantly on mobile, where a screen leaves a room and rejoins it across
   /// a lifecycle event without awaiting — leaves the two registries
   /// disagreeing and throws "Subscription to a channel already exists".
@@ -102,7 +102,7 @@ class RealtimeService {
   /// catch schema drift between server and client.
   Stream<RealtimeParseError> get onParseError => _parseErrorController.stream;
 
-  /// Builds the Centrifuge client. Overridable so tests can drive the
+  /// Builds the realtime client. Overridable so tests can drive the
   /// subscribe/unsubscribe lifecycle without a server.
   final centrifuge.Client Function(String url, centrifuge.ClientConfig config)?
       clientFactory;
@@ -131,7 +131,7 @@ class RealtimeService {
   int _generation = 0;
   bool _disposed = false;
 
-  /// Unsubscribe codes Centrifuge sets itself (0 = unsubscribe called,
+  /// Unsubscribe codes the realtime client sets itself (0 = unsubscribe called,
   /// 2 = client closed). Every other code means the server refused or ended
   /// the subscription.
   static bool _isServerUnsubscribe(int code) => code != 0 && code != 2;
@@ -150,7 +150,7 @@ class RealtimeService {
     _emit(_connectionStateController, state);
   }
 
-  /// Connects to the Centrifugo server.
+  /// Connects to the realtime server.
   Future<void> connect() async {
     if (_client != null || _disposed) return;
 
@@ -164,7 +164,7 @@ class RealtimeService {
       if (generation != _generation || _client != null) return;
 
       _client = (clientFactory ?? centrifuge.createClient)(
-        RiviumChatConfig.centrifugoUrl,
+        RiviumChatConfig.realtimeUrl,
         centrifuge.ClientConfig(
           token: token,
           getToken: (event) async => await _getToken(),
@@ -202,7 +202,7 @@ class RealtimeService {
     }
   }
 
-  /// Disconnects from the Centrifugo server.
+  /// Disconnects from the realtime server.
   Future<void> disconnect() async {
     _generation++;
     if (_client == null) {
@@ -213,7 +213,7 @@ class RealtimeService {
       return;
     }
 
-    // Free every channel in Centrifuge's registry as well as our own map.
+    // Free every channel in the realtime client's registry as well as our own map.
     // Dropping only our map left the names held by the client, so every
     // channel threw "already exists" on the next subscribe — for the life of
     // the process.
@@ -440,7 +440,7 @@ class RealtimeService {
 
     sub.publication.listen((event) {
       // Decode step: a decode failure means the frame is truly garbage
-      // (rare — Centrifugo speaks binary-safe JSON). Report it and
+      // (rare — the realtime server speaks binary-safe JSON). Report it and
       // move on.
       Map<String, dynamic>? data;
       try {
@@ -621,10 +621,10 @@ class RealtimeService {
 
   /// Tears one channel down.
   ///
-  /// The Centrifuge registry is cleared **before** awaiting `unsubscribe()`.
+  /// The realtime client's registry is cleared **before** awaiting `unsubscribe()`.
   /// The old order — remove from our map, await the network round-trip, then
-  /// free the Centrifuge entry — left a window in which our map said "free"
-  /// while Centrifuge still held the name, so a re-subscribe arriving in that
+  /// free the realtime client's entry — left a window in which our map said "free"
+  /// while the realtime client still held the name, so a re-subscribe arriving in that
   /// window threw "Subscription to a channel already exists". On iOS the
   /// window is wide, because backgrounding suspends the socket and the
   /// unsubscribe round-trip cannot complete.
@@ -635,7 +635,7 @@ class RealtimeService {
 
     // Free the name first, so the channel is immediately re-subscribable.
     // Not awaited, so its failure must not escape: when the socket closes
-    // mid-unsubscribe (disconnect, dispose) Centrifuge fails it with
+    // mid-unsubscribe (disconnect, dispose) the realtime client fails it with
     // ClientDisconnectedError, which would reach the app's zone as an
     // uncaught error (and its crash reporter) on every sign-out.
     _client?.removeSubscription(sub).ignore();

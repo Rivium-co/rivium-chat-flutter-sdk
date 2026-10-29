@@ -42,9 +42,13 @@ class RiviumChatConfig {
   /// Base URL for the RiviumChat REST API.
   static const String baseUrl = 'https://chat.rivium.co';
 
-  /// WebSocket URL for Centrifugo connection.
-  static const String centrifugoUrl =
+  /// WebSocket URL for the realtime connection.
+  static const String realtimeUrl =
       'wss://ws-chat.rivium.co/connection/websocket';
+
+  /// WebSocket URL for the realtime connection.
+  @Deprecated('Use realtimeUrl')
+  static const String centrifugoUrl = realtimeUrl;
 
   /// Timeout for REST calls.
   ///
@@ -59,7 +63,7 @@ class RiviumChatConfig {
   /// Current user's external ID.
   final String userId;
 
-  /// Optional custom user info to include in Centrifugo token.
+  /// Optional custom user info to include in the realtime connection token.
   final Map<String, dynamic>? userInfo;
 
   /// Optional file uploader callback for sending attachments.

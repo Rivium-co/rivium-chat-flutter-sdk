@@ -230,7 +230,7 @@ class PresenceEvent {
 /// to your observability layer (RiviumTrace, Sentry, etc.) so a bad
 /// wire payload surfaces instead of vanishing.
 ///
-/// [channel] is the Centrifugo channel the frame came in on (e.g.
+/// [channel] is the realtime channel the frame came in on (e.g.
 /// `chat:room_<uuid>`). [eventType] is the parsed `event`/`type` field
 /// from the payload — `null` when decode itself failed. [payload] is
 /// the raw decoded JSON when available. [error] and [stackTrace] are

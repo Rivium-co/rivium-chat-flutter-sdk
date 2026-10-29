@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'models/attachment.dart';
+import 'outbox/outbox_store.dart';
 
 /// Result of a file upload operation.
 class FileUploadResult {
@@ -75,6 +76,17 @@ class RiviumChatConfig {
   /// project can disable in Rivium Console.
   final ChatTokenProvider? tokenProvider;
 
+  /// Off by default: `sendMessage` without network throws, as before. When
+  /// on, a message that cannot be sent because of the network (no network,
+  /// timeout, server busy) is kept and sent when the connection is back, in
+  /// order and never twice; `sendMessage` returns it as a pending message
+  /// (`isPending == true`). See `onMessageSent` and `onMessageFailed`.
+  final bool queueOfflineMessages;
+
+  /// With [queueOfflineMessages]: where the queue is kept. In memory by
+  /// default; pass your own [OutboxStore] to keep it across app restarts.
+  final OutboxStore? outboxStore;
+
   const RiviumChatConfig({
     required this.apiKey,
     required this.userId,
@@ -82,7 +94,19 @@ class RiviumChatConfig {
     this.fileUploader,
     this.tokenProvider,
     this.httpTimeout = const Duration(seconds: 15),
+    this.queueOfflineMessages = false,
+    this.outboxStore,
   });
+
+  /// Throws an [ArgumentError] when [apiKey] or [userId] is empty.
+  void validate() {
+    if (apiKey.trim().isEmpty) {
+      throw ArgumentError.value(apiKey, 'apiKey', 'API key is required');
+    }
+    if (userId.trim().isEmpty) {
+      throw ArgumentError.value(userId, 'userId', 'User ID is required');
+    }
+  }
 
   /// Creates a copy with modified fields.
   RiviumChatConfig copyWith({
@@ -92,6 +116,8 @@ class RiviumChatConfig {
     FileUploader? fileUploader,
     ChatTokenProvider? tokenProvider,
     Duration? httpTimeout,
+    bool? queueOfflineMessages,
+    OutboxStore? outboxStore,
   }) {
     return RiviumChatConfig(
       apiKey: apiKey ?? this.apiKey,
@@ -100,6 +126,8 @@ class RiviumChatConfig {
       fileUploader: fileUploader ?? this.fileUploader,
       tokenProvider: tokenProvider ?? this.tokenProvider,
       httpTimeout: httpTimeout ?? this.httpTimeout,
+      queueOfflineMessages: queueOfflineMessages ?? this.queueOfflineMessages,
+      outboxStore: outboxStore ?? this.outboxStore,
     );
   }
 }

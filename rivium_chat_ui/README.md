@@ -24,8 +24,8 @@ Add to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  rivium_chat: ^0.1.0
-  rivium_chat_ui: ^0.1.0
+  rivium_chat: ^0.2.0
+  rivium_chat_ui: ^0.2.0
 ```
 
 Then run:

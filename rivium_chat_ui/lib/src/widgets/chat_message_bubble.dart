@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:rivium_chat/rivium_chat.dart';
+import '../state/queued_message_merge.dart';
 
 /// A message bubble widget for displaying chat messages.
 class ChatMessageBubble extends StatelessWidget {
@@ -15,6 +16,10 @@ class ChatMessageBubble extends StatelessWidget {
   final bool isRead;
   final Map<String, String>? mentionDisplayNames;
 
+  /// Name shown above the quoted message of a reply (the quoted sender's
+  /// display name). Hidden when null.
+  final String? replySenderName;
+
   const ChatMessageBubble({
     super.key,
     required this.message,
@@ -26,6 +31,7 @@ class ChatMessageBubble extends StatelessWidget {
     this.onReactionTap,
     this.isRead = false,
     this.mentionDisplayNames,
+    this.replySenderName,
   });
 
   @override
@@ -142,11 +148,27 @@ class ChatMessageBubble extends StatelessWidget {
           ),
         ),
       ),
-      child: Text(
-        reply.content,
-        maxLines: 2,
-        overflow: TextOverflow.ellipsis,
-        style: Theme.of(context).textTheme.bodySmall,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (replySenderName != null)
+            Text(
+              replySenderName!,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: Theme.of(context).colorScheme.primary,
+                    fontWeight: FontWeight.w600,
+                  ),
+            ),
+          Text(
+            reply.content,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
       ),
     );
   }
@@ -417,13 +439,49 @@ class ChatMessageBubble extends StatelessWidget {
 
   Widget _buildStatusIcon(BuildContext context) {
     if (message.isFailed) {
-      return GestureDetector(
-        onTap: onRetry,
-        child: Icon(
-          Icons.error_outline,
-          size: 16,
-          color: Theme.of(context).colorScheme.error,
+      final color = Theme.of(context).colorScheme.error;
+      return Semantics(
+        button: onRetry != null,
+        label: 'Message not sent. Retry',
+        child: InkWell(
+          onTap: onRetry,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.error_outline, size: 16, color: color),
+                if (onRetry != null) ...[
+                  const SizedBox(width: 2),
+                  Text(
+                    'Retry',
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: color,
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
+                ],
+              ],
+            ),
+          ),
         ),
+      );
+    }
+
+    if (isQueuedOffline(message)) {
+      // Queued by the SDK's offline outbox: sent when the network is back.
+      final color = Theme.of(context).colorScheme.onSurfaceVariant;
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.access_time, size: 16, color: color),
+          const SizedBox(width: 2),
+          Text(
+            waitingForNetworkLabel,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(color: color),
+          ),
+        ],
       );
     }
 

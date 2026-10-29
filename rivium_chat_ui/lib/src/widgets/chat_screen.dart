@@ -34,6 +34,11 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollController = ScrollController();
   Message? _replyingTo;
 
+  /// The room's state. [ChatChannelScope] is built *inside* this widget, so
+  /// this State's own context cannot look it up: menu actions, dialogs and
+  /// paging use the state captured from the scope's builder instead.
+  ChatChannelState? _channel;
+
   @override
   void initState() {
     super.initState();
@@ -50,7 +55,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // Load more when near the top (since list is reversed)
     if (_scrollController.position.pixels >=
         _scrollController.position.maxScrollExtent - 200) {
-      ChatChannelScope.read(context).loadMore();
+      _channel?.loadMore();
     }
   }
 
@@ -61,6 +66,7 @@ class _ChatScreenState extends State<ChatScreen> {
       child: Builder(
         builder: (context) {
           final state = ChatChannelScope.of(context);
+          _channel = state;
 
           if (state.isLoading && state.messages.isEmpty) {
             return const Center(child: CircularProgressIndicator());
@@ -186,7 +192,16 @@ class _ChatScreenState extends State<ChatScreen> {
             otherUserName: widget.otherUserName,
             currentUserId: widget.currentUserId,
             isRead: isRead,
-            onRetry: message.isFailed ? () => state.retryMessage(message) : null,
+            replySenderName: message.replyTo == null
+                ? null
+                : message.replyTo!.senderUserId == widget.currentUserId
+                    ? 'You'
+                    : state.displayNameFor(message.replyTo!.senderUserId),
+            // A retry that fails again marks the message failed again;
+            // the error must not escape as an uncaught one.
+            onRetry: message.isFailed
+                ? () => state.retryMessage(message).catchError((_) {})
+                : null,
             onReactionTap: (emoji) => _toggleReaction(message, emoji),
           );
         }
@@ -225,7 +240,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _handleContextAction(MessageAction action, Message message) {
-    final state = ChatChannelScope.read(context);
+    final state = _channel;
+    if (state == null) return;
 
     switch (action) {
       case MessageAction.reply:
@@ -238,25 +254,38 @@ class _ChatScreenState extends State<ChatScreen> {
         _showDeleteConfirmation(message);
         break;
       case MessageAction.pin:
-        state.pinMessage(message.id);
+        _run(state.pinMessage(message.id), 'Could not pin the message');
         break;
       case MessageAction.unpin:
-        state.unpinMessage(message.id);
+        _run(state.unpinMessage(message.id), 'Could not unpin the message');
         break;
     }
   }
 
+  /// Runs a message action; a failure shows a short note instead of
+  /// escaping as an uncaught error.
+  void _run(Future<void> action, String failure) {
+    action.catchError((Object _) {
+      if (!mounted) return;
+      ScaffoldMessenger.maybeOf(context)
+          ?.showSnackBar(SnackBar(content: Text(failure)));
+    });
+  }
+
   void _toggleReaction(Message message, String emoji) {
-    final state = ChatChannelScope.read(context);
+    final state = _channel;
+    if (state == null) return;
     final hasMyReaction = message.reactions?.any(
           (r) => r.userId == widget.currentUserId && r.emoji == emoji,
         ) ??
         false;
 
     if (hasMyReaction) {
-      state.removeReaction(message.id, emoji: emoji);
+      _run(state.removeReaction(message.id, emoji: emoji),
+          'Could not remove the reaction');
     } else {
-      state.addReaction(message.id, emoji: emoji);
+      _run(state.addReaction(message.id, emoji: emoji),
+          'Could not add the reaction');
     }
   }
 
@@ -284,8 +313,11 @@ class _ChatScreenState extends State<ChatScreen> {
             onPressed: () {
               final newContent = controller.text.trim();
               if (newContent.isNotEmpty && newContent != message.content) {
-                ChatChannelScope.read(context)
-                    .editMessage(message.id, content: newContent);
+                final state = _channel;
+                if (state != null) {
+                  _run(state.editMessage(message.id, content: newContent),
+                      'Could not edit the message');
+                }
               }
               Navigator.pop(context);
             },
@@ -309,7 +341,11 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           FilledButton(
             onPressed: () {
-              ChatChannelScope.read(context).deleteMessage(message.id);
+              final state = _channel;
+              if (state != null) {
+                _run(state.deleteMessage(message.id),
+                    'Could not delete the message');
+              }
               Navigator.pop(context);
             },
             style: FilledButton.styleFrom(

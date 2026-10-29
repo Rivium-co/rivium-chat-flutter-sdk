@@ -28,6 +28,12 @@ dependencies:
   http: ^1.2.0
   path: ^1.9.0
 
+# rivium_chat_ui (published) depends on rivium_chat from pub.dev. This example
+# builds against the local core and UI kit, so point both at the paths here.
+dependency_overrides:
+  rivium_chat:
+    path: ../rivium_chat_core
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

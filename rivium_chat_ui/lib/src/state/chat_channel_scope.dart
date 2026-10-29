@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:rivium_chat/rivium_chat.dart';
+import 'queued_message_merge.dart';
 import 'rivium_chat_scope.dart';
 
 /// State for a single chat room/channel.
@@ -21,6 +22,10 @@ class ChatChannelState extends ChangeNotifier {
   Object? _error;
 
   final List<StreamSubscription> _subscriptions = [];
+
+  /// Set by [dispose]. Loads that finish later (the screen was closed while
+  /// they ran) must not notify a disposed notifier, which throws.
+  bool _disposed = false;
 
   ChatChannelState({
     required this.client,
@@ -43,8 +48,17 @@ class ChatChannelState extends ChangeNotifier {
   Object? get error => _error;
   bool get hasError => _error != null;
 
+  /// The participant's display name, or their user id when they have none.
+  String displayNameFor(String userId) =>
+      _participantDisplayNames[userId] ?? userId;
+
   bool isUserOnline(String userId) => _onlineUsers.contains(userId);
   bool isUserTyping(String userId) => _typingUsers.contains(userId);
+
+  @override
+  void notifyListeners() {
+    if (!_disposed) super.notifyListeners();
+  }
 
   // ============ Initialization ============
 
@@ -60,6 +74,7 @@ class ChatChannelState extends ChangeNotifier {
       final result = await client.getMessages(roomId);
       _messages = result.messages.reversed.toList();
       _hasMore = result.hasMore;
+      await _showQueuedMessages();
 
       // Load initial presence
       _onlineUsers = await client.getRoomPresence(roomId);
@@ -82,6 +97,9 @@ class ChatChannelState extends ChangeNotifier {
         // Non-critical: read receipts will still work via real-time events
       }
 
+      // The screen was closed while loading.
+      if (_disposed) return;
+
       // Setup listeners
       _setupListeners();
 
@@ -94,6 +112,17 @@ class ChatChannelState extends ChangeNotifier {
     } finally {
       _isLoading = false;
       notifyListeners();
+    }
+  }
+
+  /// Shows messages the offline outbox still holds for this room (e.g. after
+  /// a restart). Only with `queueOfflineMessages`.
+  Future<void> _showQueuedMessages() async {
+    if (!client.config.queueOfflineMessages) return;
+    try {
+      addQueuedMessages(_messages, await client.getPendingMessages(roomId: roomId));
+    } catch (_) {
+      // Non-critical
     }
   }
 
@@ -133,6 +162,22 @@ class ChatChannelState extends ChangeNotifier {
         .where((e) => e.roomId == roomId && e.userId != client.config.userId)
         .listen(_handleReadReceipt));
 
+    // Offline outbox: a queued message was stored / left the queue unsent
+    if (client.config.queueOfflineMessages) {
+      _subscriptions.add(client.onMessageSent
+          .where((e) => e.message.roomId == roomId)
+          .listen((e) {
+        mergeSentMessage(_messages, e.localId, e.message);
+        notifyListeners();
+      }));
+      _subscriptions.add(client.onMessageFailed
+          .where((e) => e.roomId == roomId)
+          .listen((e) {
+        markQueuedFailed(_messages, e.localId);
+        notifyListeners();
+      }));
+    }
+
     // Presence
     _subscriptions.add(client.onPresenceChange
         .where((e) => e.roomId == roomId)
@@ -152,24 +197,9 @@ class ChatChannelState extends ChangeNotifier {
   // ============ Event Handlers ============
 
   void _handleNewMessage(Message message) {
-    // Check if message already exists (by ID)
-    final existingIndex = _messages.indexWhere((m) => m.id == message.id);
-    if (existingIndex >= 0) {
-      // Update existing (remove pending flag)
-      _messages[existingIndex] = message;
-    } else {
-      // Check if this is the real version of a pending message (same sender + content)
-      final pendingIndex = _messages.indexWhere((m) =>
-          m.isPending &&
-          m.senderUserId == message.senderUserId &&
-          m.content == message.content);
-      if (pendingIndex >= 0) {
-        _messages[pendingIndex] = message;
-      } else {
-        // Add new message at the beginning (newest first)
-        _messages.insert(0, message);
-      }
-    }
+    // Same id, a queued copy (same clientMessageId) or a pending copy (same
+    // sender + text) is updated in place; otherwise added on top. Never twice.
+    mergeLiveMessage(_messages, message);
     notifyListeners();
 
     // Mark as read if message is from other user
@@ -285,6 +315,7 @@ class ChatChannelState extends ChangeNotifier {
       final result = await client.getMessages(roomId);
       _messages = result.messages.reversed.toList(); // Reverse: API returns oldest first
       _hasMore = result.hasMore;
+      await _showQueuedMessages();
     } catch (e) {
       _error = e;
     } finally {
@@ -353,12 +384,10 @@ class ChatChannelState extends ChangeNotifier {
         replyToId: replyToId,
       );
 
-      // Replace pending with real message
-      final index = _messages.indexWhere((m) => m.id == pendingId);
-      if (index >= 0) {
-        _messages[index] = sent;
-        notifyListeners();
-      }
+      // Replace pending with the real message, or with the queued one (shown
+      // as "Waiting for network…" with `queueOfflineMessages`); never twice.
+      applySendResult(_messages, pendingId, sent);
+      notifyListeners();
     } catch (e) {
       // Mark as failed
       final index = _messages.indexWhere((m) => m.id == pendingId);
@@ -418,14 +447,28 @@ class ChatChannelState extends ChangeNotifier {
     await client.removeReaction(messageId, emoji: emoji);
   }
 
-  /// Pins a message.
+  /// Pins a message. The message shows as pinned as soon as the server
+  /// confirms, without waiting for the realtime event.
   Future<void> pinMessage(String messageId) async {
     await client.pinMessage(messageId);
+    _setPinned(messageId, true);
   }
 
   /// Unpins a message.
   Future<void> unpinMessage(String messageId) async {
     await client.unpinMessage(messageId);
+    _setPinned(messageId, false);
+  }
+
+  void _setPinned(String messageId, bool pinned) {
+    final index = _messages.indexWhere((m) => m.id == messageId);
+    if (index < 0 || _messages[index].isPinned == pinned) return;
+    _messages[index] = _messages[index].copyWith(
+      isPinned: pinned,
+      pinnedBy: pinned ? client.config.userId : null,
+      pinnedAt: pinned ? DateTime.now() : null,
+    );
+    notifyListeners();
   }
 
   /// Publishes a typing indicator.
@@ -437,18 +480,25 @@ class ChatChannelState extends ChangeNotifier {
       return; // Throttle
     }
     _lastTypingPublish = now;
-    await client.publishTyping(roomId);
+    try {
+      await client.publishTyping(roomId);
+    } catch (_) {
+      // A typing indicator is best effort.
+    }
   }
 
   @override
   void dispose() {
+    _disposed = true;
     for (final sub in _subscriptions) {
       sub.cancel();
     }
     for (final timer in _typingTimers.values) {
       timer.cancel();
     }
-    client.leaveRoom(roomId);
+    // Not awaited, so its failure (socket closing, client already disposed
+    // on sign-out) must not reach the app's zone as an uncaught error.
+    client.leaveRoom(roomId).catchError((_) {});
     super.dispose();
   }
 }

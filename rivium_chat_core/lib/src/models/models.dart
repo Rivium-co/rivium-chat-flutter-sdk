@@ -6,3 +6,4 @@ export 'message.dart';
 export 'participant.dart';
 export 'room.dart';
 export 'unread_summary.dart';
+export 'search_result.dart';

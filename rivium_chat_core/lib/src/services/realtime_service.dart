@@ -118,19 +118,50 @@ class RealtimeService {
     this.subscribeTimeout = const Duration(seconds: 10),
   });
 
+  /// Adds an event unless [dispose] already closed the stream: the disconnect
+  /// that dispose starts finishes later, and its events (state, errors, the
+  /// last channel events) must be dropped, not thrown into the app's zone.
+  void _emit<T>(StreamController<T> controller, T event) {
+    if (!controller.isClosed) controller.add(event);
+  }
+
+  /// Bumped by [disconnect] and [dispose]. A [connect] that was still
+  /// fetching its token when one of them ran must not open a socket
+  /// afterwards: the app asked to be offline (or threw the client away).
+  int _generation = 0;
+  bool _disposed = false;
+
+  /// Unsubscribe codes Centrifuge sets itself (0 = unsubscribe called,
+  /// 2 = client closed). Every other code means the server refused or ended
+  /// the subscription.
+  static bool _isServerUnsubscribe(int code) => code != 0 && code != 2;
+
+  /// The server's code and reason behind a subscription error, when it sent
+  /// one (for example 403, `Not a participant in this room`).
+  static (int?, String) _subscriptionFailure(Object error) {
+    final inner =
+        error is centrifuge.SubscriptionSubscribeError ? error.error : error;
+    if (inner is centrifuge.Error) return (inner.code, inner.message);
+    return (null, error.toString());
+  }
+
   void _updateState(ConnectionState state) {
     _currentState = state;
-    _connectionStateController.add(state);
+    _emit(_connectionStateController, state);
   }
 
   /// Connects to the Centrifugo server.
   Future<void> connect() async {
-    if (_client != null) return;
+    if (_client != null || _disposed) return;
 
+    final generation = _generation;
     _updateState(ConnectionState.connecting);
 
     try {
       final token = await _getToken();
+
+      // disconnect() or dispose() ran while the token was being fetched.
+      if (generation != _generation || _client != null) return;
 
       _client = (clientFactory ?? centrifuge.createClient)(
         RiviumChatConfig.centrifugoUrl,
@@ -151,27 +182,36 @@ class RealtimeService {
       _client!.disconnected.listen((event) {
         _updateState(ConnectionState.disconnected);
         if (event.reason.isNotEmpty) {
-          _errorController
-              .add(ConnectionErrorEvent(error: 'Disconnected: ${event.reason}'));
+          _emit(_errorController,
+              ConnectionErrorEvent(error: 'Disconnected: ${event.reason}'));
         }
       });
 
       _client!.error.listen((event) {
         _updateState(ConnectionState.error);
-        _errorController.add(ConnectionErrorEvent(error: event.error));
+        _emit(_errorController, ConnectionErrorEvent(error: event.error));
       });
 
       await _client!.connect();
     } catch (e) {
+      // A connect() that disconnect() or dispose() superseded fails quietly.
+      if (generation != _generation) return;
       _updateState(ConnectionState.error);
-      _errorController.add(ConnectionErrorEvent(error: e));
+      _emit(_errorController, ConnectionErrorEvent(error: e));
       rethrow;
     }
   }
 
   /// Disconnects from the Centrifugo server.
   Future<void> disconnect() async {
-    if (_client == null) return;
+    _generation++;
+    if (_client == null) {
+      // A connect() still fetching its token gives up (see [connect]).
+      if (_currentState == ConnectionState.connecting) {
+        _updateState(ConnectionState.disconnected);
+      }
+      return;
+    }
 
     // Free every channel in Centrifuge's registry as well as our own map.
     // Dropping only our map left the names held by the client, so every
@@ -216,19 +256,19 @@ class RealtimeService {
       roomId,
       recoverable: true,
       onPublication: (data) => _handleChatEvent(roomId, data),
-      onRecoveryFailed: () => _recoveryFailedController.add(roomId),
+      onRecoveryFailed: () => _emit(_recoveryFailedController, roomId),
       ).then<Object?>((_) => null, onError: (Object e) => e),
 
       // Subscribe to presence channel
       _subscribeToChannel(
       'presence:room_$roomId',
       roomId,
-      onJoin: (userId) => _presenceController.add(PresenceEvent(
+      onJoin: (userId) => _emit(_presenceController, PresenceEvent(
         roomId: roomId,
         userId: userId,
         isOnline: true,
       )),
-      onLeave: (userId) => _presenceController.add(PresenceEvent(
+      onLeave: (userId) => _emit(_presenceController, PresenceEvent(
         roomId: roomId,
         userId: userId,
         isOnline: false,
@@ -242,7 +282,7 @@ class RealtimeService {
       onPublication: (data) {
         final userId = data['userId'] as String?;
         if (userId != null && userId != _config.userId) {
-          _typingController.add(TypingEvent(
+          _emit(_typingController, TypingEvent(
             roomId: roomId,
             userId: userId,
             isTyping: data['isTyping'] as bool? ?? true,
@@ -339,7 +379,7 @@ class RealtimeService {
     );
 
     sub.subscribing.listen((event) {
-      _subscriptionStateController.add(SubscriptionStateEvent(
+      _emit(_subscriptionStateController, SubscriptionStateEvent(
         roomId: roomId,
         channel: channel,
         status: SubscriptionStatus.subscribing,
@@ -349,7 +389,7 @@ class RealtimeService {
     sub.subscribed.listen((event) {
       _subscribedChannels.add(channel);
       if (!outcome.isCompleted) outcome.complete();
-      _subscriptionStateController.add(SubscriptionStateEvent(
+      _emit(_subscriptionStateController, SubscriptionStateEvent(
         roomId: roomId,
         channel: channel,
         status: SubscriptionStatus.subscribed,
@@ -374,13 +414,28 @@ class RealtimeService {
 
     sub.unsubscribed.listen((event) {
       _subscribedChannels.remove(channel);
-      _subscriptionStateController.add(SubscriptionStateEvent(
+      _emit(_subscriptionStateController, SubscriptionStateEvent(
         roomId: roomId,
         channel: channel,
         status: SubscriptionStatus.unsubscribed,
         code: event.code,
         reason: event.reason,
       ));
+      if (_isServerUnsubscribe(event.code)) {
+        // The server refused or ended the subscription (for example: not a
+        // participant of the room). Drop the dead object so a later
+        // subscribeRoom() builds a fresh one, and tell the app the room's
+        // live updates stopped, so it reloads or shows the refusal.
+        if (identical(_subscriptions[channel], sub)) {
+          _subscriptions.remove(channel);
+          _client?.removeSubscription(sub).ignore();
+        }
+        if (!outcome.isCompleted) {
+          outcome.completeError(StateError(
+              'subscribe to $channel refused: ${event.code} ${event.reason}'));
+        }
+        if (recoverable) onRecoveryFailed?.call();
+      }
     });
 
     sub.publication.listen((event) {
@@ -391,7 +446,7 @@ class RealtimeService {
       try {
         data = jsonDecode(utf8.decode(event.data)) as Map<String, dynamic>?;
       } catch (e, st) {
-        _parseErrorController.add(RealtimeParseError(
+        _emit(_parseErrorController, RealtimeParseError(
           channel: channel,
           roomId: roomId,
           error: e,
@@ -435,13 +490,15 @@ class RealtimeService {
           StateError('subscribe to $channel failed: ${event.error}'),
         );
       }
-      _subscriptionStateController.add(SubscriptionStateEvent(
+      final (code, reason) = _subscriptionFailure((event.error ?? 'unknown') as Object);
+      _emit(_subscriptionStateController, SubscriptionStateEvent(
         roomId: roomId,
         channel: channel,
         status: SubscriptionStatus.error,
-        reason: event.error.toString(),
+        code: code,
+        reason: reason,
       ));
-      _errorController.add(
+      _emit(_errorController, 
         ConnectionErrorEvent(error: 'Subscription failed on $channel: ${event.error}'),
       );
     });
@@ -454,9 +511,12 @@ class RealtimeService {
     } catch (e) {
       // Leave nothing half-registered: drop the dead subscription so a retry
       // builds a fresh one rather than hitting the "already subscribed" path.
-      _subscriptions.remove(channel);
+      if (identical(_subscriptions[channel], sub)) {
+        _subscriptions.remove(channel);
+        // Not awaited: its failure must not reach the app's zone.
+        _client?.removeSubscription(sub).ignore();
+      }
       _subscribedChannels.remove(channel);
-      _client?.removeSubscription(sub);
       rethrow;
     }
   }
@@ -473,16 +533,16 @@ class RealtimeService {
     try {
       switch (eventType) {
         case 'message':
-          _messageController.add(Message.fromJson(payload));
+          _emit(_messageController, Message.fromJson(payload));
           break;
         case 'read':
-          _readReceiptController.add(ReadReceipt.fromJson(payload));
+          _emit(_readReceiptController, ReadReceipt.fromJson(payload));
           break;
         case 'deleted':
-          _deletionController.add(MessageDeletion.fromJson(payload));
+          _emit(_deletionController, MessageDeletion.fromJson(payload));
           break;
         case 'message_edited':
-          _editController.add(MessageEditEvent(
+          _emit(_editController, MessageEditEvent(
             messageId: payload['messageId'] as String,
             roomId: payload['roomId'] as String? ?? roomId,
             content: payload['content'] as String,
@@ -491,7 +551,7 @@ class RealtimeService {
           ));
           break;
         case 'reaction_added':
-          _reactionController.add(ReactionEvent(
+          _emit(_reactionController, ReactionEvent(
             messageId: payload['messageId'] as String,
             roomId: payload['roomId'] as String? ?? roomId,
             userId: payload['userId'] as String,
@@ -501,7 +561,7 @@ class RealtimeService {
           ));
           break;
         case 'reaction_removed':
-          _reactionController.add(ReactionEvent(
+          _emit(_reactionController, ReactionEvent(
             messageId: payload['messageId'] as String,
             roomId: payload['roomId'] as String? ?? roomId,
             userId: payload['userId'] as String,
@@ -510,7 +570,7 @@ class RealtimeService {
           ));
           break;
         case 'message_pinned':
-          _pinController.add(MessagePinEvent(
+          _emit(_pinController, MessagePinEvent(
             messageId: payload['messageId'] as String,
             roomId: payload['roomId'] as String? ?? roomId,
             userId: payload['pinnedBy'] as String,
@@ -518,7 +578,7 @@ class RealtimeService {
           ));
           break;
         case 'message_unpinned':
-          _pinController.add(MessagePinEvent(
+          _emit(_pinController, MessagePinEvent(
             messageId: payload['messageId'] as String,
             roomId: payload['roomId'] as String? ?? roomId,
             userId: payload['unpinnedBy'] as String,
@@ -528,11 +588,11 @@ class RealtimeService {
         default:
           // Try parsing as a direct message if no type specified
           if (payload.containsKey('id') && payload.containsKey('content')) {
-            _messageController.add(Message.fromJson(payload));
+            _emit(_messageController, Message.fromJson(payload));
           }
       }
     } catch (e, st) {
-      _parseErrorController.add(RealtimeParseError(
+      _emit(_parseErrorController, RealtimeParseError(
         channel: 'chat:room_$roomId',
         roomId: roomId,
         eventType: eventType,
@@ -555,7 +615,7 @@ class RealtimeService {
       roomId,
       recoverable: true,
       onPublication: (data) => _handleChatEvent(roomId, data),
-      onRecoveryFailed: () => _recoveryFailedController.add(roomId),
+      onRecoveryFailed: () => _emit(_recoveryFailedController, roomId),
     );
   }
 
@@ -574,7 +634,11 @@ class RealtimeService {
     if (sub == null) return;
 
     // Free the name first, so the channel is immediately re-subscribable.
-    _client?.removeSubscription(sub);
+    // Not awaited, so its failure must not escape: when the socket closes
+    // mid-unsubscribe (disconnect, dispose) Centrifuge fails it with
+    // ClientDisconnectedError, which would reach the app's zone as an
+    // uncaught error (and its crash reporter) on every sign-out.
+    _client?.removeSubscription(sub).ignore();
     try {
       await sub.unsubscribe();
     } catch (_) {
@@ -624,13 +688,15 @@ class RealtimeService {
     }
   }
 
-  DateTime _lastTypingTime = DateTime.fromMillisecondsSinceEpoch(0);
+  /// When a typing indicator was last published, per room.
+  final Map<String, DateTime> _lastTypingTime = {};
 
-  /// Publishes a typing indicator (throttled to 2 seconds).
+  /// Publishes a typing indicator (throttled to 2 seconds per room).
   Future<void> publishTyping(String roomId) async {
     final now = DateTime.now();
-    if (now.difference(_lastTypingTime).inMilliseconds < 2000) return;
-    _lastTypingTime = now;
+    final last = _lastTypingTime[roomId];
+    if (last != null && now.difference(last).inMilliseconds < 2000) return;
+    _lastTypingTime[roomId] = now;
 
     final channel = 'typing:room_$roomId';
     final sub = _subscriptions[channel];
@@ -649,6 +715,7 @@ class RealtimeService {
 
   /// Disposes all resources.
   void dispose() {
+    _disposed = true;
     disconnect();
     _connectionStateController.close();
     _messageController.close();

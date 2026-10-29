@@ -24,11 +24,19 @@ import 'services/file_upload_service.dart';
 /// - Message reactions and pinning
 /// - Read receipts
 
+/// Your project's public key from Rivium Console. Pass it when you run the app:
+///
+///   flutter run --dart-define=RIVIUM_API_KEY=rv_live_...
+const String riviumApiKey = String.fromEnvironment(
+  'RIVIUM_API_KEY',
+  defaultValue: 'rv_live_YOUR_PUBLIC_KEY',
+);
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await RiviumPush.init(const RiviumPushConfig(
-    apiKey: 'rv_live_64e0ada5eeb66e3adf6136337802a5a34713ce4966372854',
+    apiKey: riviumApiKey,
     showNotificationInForeground: true,
   ));
 
@@ -69,9 +77,8 @@ class _RiviumChatEcommerceAppState extends State<RiviumChatEcommerceApp> {
   String? _currentUserName;
   String? _userRole; // 'buyer' or 'seller'
 
-  // Your RiviumChat API key (from AuthLeap dashboard)
-  static const String _apiKey =
-      'rv_live_64e0ada5eeb66e3adf6136337802a5a34713ce4966372854';
+  // Your project's public key (see [riviumApiKey]).
+  static const String _apiKey = riviumApiKey;
 
   void _onLogin(String userId, String userName, String role) {
     debugPrint(

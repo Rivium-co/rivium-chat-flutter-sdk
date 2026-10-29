@@ -95,16 +95,15 @@ flutter pub get
 
 ### 2. Configure API Key
 
-Open `lib/main.dart` and replace the API key:
+Copy your project's public key (`rv_live_...`) from Rivium Console and pass it
+when you run the app:
 
-```dart
-static const String _apiKey = 'YOUR_RIVIUM_CHAT_API_KEY';
+```bash
+flutter run --dart-define=RIVIUM_API_KEY=rv_live_your_public_key
 ```
 
-Get your API key from the [AuthLeap Dashboard](https://dashboard.authleap.com):
-1. Go to Organizations → Your Org → Projects
-2. Enable RiviumChat for your project
-3. Copy the API key
+The key is read in `lib/main.dart` (`riviumApiKey`). Don't commit a real key
+to the source.
 
 ### 3. Configure File Uploads (Optional)
 
@@ -127,7 +126,7 @@ return FileUploadResult(
 ### 4. Run the App
 
 ```bash
-flutter run
+flutter run --dart-define=RIVIUM_API_KEY=rv_live_your_public_key
 ```
 
 ## Usage Scenarios
@@ -286,9 +285,9 @@ client.onReactionEvent.listen((event) {
 
 ## Push Notifications
 
-RiviumChat automatically sends push notifications to offline users via Pushino. Configure templates in the AuthLeap dashboard:
+RiviumChat automatically sends push notifications to offline users via [Rivium Push](https://rivium.co/cloud/rivium-push). Configure templates in [Rivium Console](https://console.rivium.co):
 
-1. Create a Pushino template with variables:
+1. Create a Rivium Push template with variables:
    - `{{senderName}}` - Who sent the message
    - `{{messagePreview}}` - First 100 chars
    - `{{orderNumber}}` - From room metadata
@@ -302,7 +301,7 @@ RiviumChat automatically sends push notifications to offline users via Pushino. 
 ### Connection Issues
 - Check API key is correct
 - Ensure device has internet
-- Check AuthLeap dashboard for project status
+- Check Rivium Console for project status
 
 ### Messages Not Appearing
 - Verify `subscribeRoom` was called (automatic with ChatScreen)
@@ -316,6 +315,6 @@ RiviumChat automatically sends push notifications to offline users via Pushino. 
 
 ## Learn More
 
-- [RiviumChat Documentation](https://docs.rivium_chat.com)
+- [Rivium Chat Documentation](https://rivium.co/cloud/rivium-chat/docs/quick-start)
 - [Flutter SDK Reference](https://pub.dev/packages/rivium_chat)
-- [AuthLeap Dashboard](https://dashboard.authleap.com)
+- [Rivium Console](https://console.rivium.co)

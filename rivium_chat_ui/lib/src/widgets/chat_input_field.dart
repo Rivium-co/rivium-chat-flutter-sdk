@@ -128,6 +128,14 @@ class _ChatInputFieldState extends State<ChatInputField> {
     );
   }
 
+  /// "yourself" for your own message, else the sender's display name (their
+  /// user id when they have none).
+  String _replyName(Message message) {
+    final state = ChatChannelScope.read(context);
+    if (message.senderUserId == state.client.config.userId) return 'yourself';
+    return state.displayNameFor(message.senderUserId);
+  }
+
   Widget _buildReplyPreview() {
     return Container(
       padding: const EdgeInsets.all(12),
@@ -147,7 +155,7 @@ class _ChatInputFieldState extends State<ChatInputField> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Replying to',
+                  'Replying to ${_replyName(widget.replyingTo!)}',
                   style: Theme.of(context).textTheme.labelSmall?.copyWith(
                         color: Theme.of(context).colorScheme.primary,
                       ),

@@ -1,10 +1,16 @@
 import 'dart:async';
+import 'package:dio/dio.dart' show HttpClientAdapter;
+import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:uuid/uuid.dart';
 import 'config.dart';
 import 'models/models.dart';
 import 'events/events.dart';
 import 'services/api_service.dart';
 import 'services/realtime_service.dart';
 import 'services/token_manager.dart';
+import 'outbox/outbox.dart';
+import 'outbox/outbox_store.dart';
+import 'outbox/pending_message.dart';
 
 /// Main client for the RiviumChat SDK.
 ///
@@ -33,19 +39,86 @@ class RiviumChatClient {
   final _authErrors = StreamController<AuthErrorEvent>.broadcast();
   TokenManager? _tokens;
 
-  RiviumChatClient(this.config) {
+  final _messageSent = StreamController<MessageSentEvent>.broadcast();
+  final _messageFailed = StreamController<MessageFailedEvent>.broadcast();
+  Outbox? _outbox;
+  StreamSubscription<ConnectionState>? _connectionSub;
+  late final DateTime Function() _now;
+
+  /// `httpClientAdapter` and `now` let tests answer requests without a
+  /// network and control the outbox's clock.
+  RiviumChatClient(
+    this.config, {
+    @visibleForTesting HttpClientAdapter? httpClientAdapter,
+    @visibleForTesting DateTime Function()? now,
+  }) {
+    _now = now ?? DateTime.now;
     final provider = config.tokenProvider;
     final tokens = provider == null ? null : TokenManager(provider);
     _tokens = tokens;
-    _api = ApiService(config, tokens: tokens, onAuthError: _emitAuthError);
+    _api = ApiService(config,
+        tokens: tokens,
+        onAuthError: _emitAuthError,
+        httpClientAdapter: httpClientAdapter);
     _realtime = RealtimeService(
       config,
       // With a tokenProvider the same user token authenticates REST and the
       // realtime connection; centrifuge asks again before it expires.
       tokens != null
-          ? tokens.get
+          ? () => _realtimeToken(tokens)
           : () => _api.getCentrifugoToken(config.userId, info: config.userInfo),
     );
+    if (config.queueOfflineMessages) {
+      final outbox = Outbox(
+        store: config.outboxStore ?? MemoryOutboxStore(),
+        userId: config.userId,
+        sender: (p) => _api.sendMessage(
+          p.roomId,
+          senderUserId: p.senderUserId,
+          content: p.content,
+          type: p.type,
+          attachments: p.attachments,
+          metadata: p.metadata,
+          replyToId: p.replyToId,
+          clientMessageId: p.clientMessageId,
+        ),
+        onSent: (e) {
+          if (!_messageSent.isClosed) _messageSent.add(e);
+        },
+        onFailed: (e) {
+          if (!_messageFailed.isClosed) _messageFailed.add(e);
+        },
+        now: _now,
+      );
+      _outbox = outbox;
+      _connectionSub = _realtime.connectionState.listen((state) {
+        if (state == ConnectionState.connected) outbox.onConnected();
+      });
+    }
+  }
+
+  /// A message queued while offline was stored by the server. Only with
+  /// [RiviumChatConfig.queueOfflineMessages].
+  Stream<MessageSentEvent> get onMessageSent => _messageSent.stream;
+
+  /// A message queued while offline left the queue without being stored
+  /// (`reason` 'expired' or 'rejected'). Only with
+  /// [RiviumChatConfig.queueOfflineMessages].
+  Stream<MessageFailedEvent> get onMessageFailed => _messageFailed.stream;
+
+  /// The user token for the realtime connection. A failing tokenProvider is
+  /// reported on [onAuthError] like it is for REST calls.
+  Future<String> _realtimeToken(TokenManager tokens) async {
+    try {
+      return await tokens.get();
+    } catch (e) {
+      _emitAuthError(AuthErrorEvent(
+        code: 'token_provider_failed',
+        message: 'tokenProvider failed',
+        error: e,
+      ));
+      rethrow;
+    }
   }
 
   void _emitAuthError(AuthErrorEvent event) {
@@ -67,8 +140,13 @@ class RiviumChatClient {
       _realtime.connectionState;
 
   /// Connects to the realtime server.
+  ///
+  /// Throws an [ArgumentError] when [RiviumChatConfig.apiKey] or
+  /// [RiviumChatConfig.userId] is empty (checked here, not when the client is
+  /// created, so a widget tree built before the user is known never breaks).
   Future<void> connect() async {
     _checkDisposed();
+    config.validate();
     await _realtime.connect();
   }
 
@@ -239,6 +317,12 @@ class RiviumChatClient {
   // ============ Message Operations ============
 
   /// Sends a message to a room.
+  ///
+  /// With [RiviumChatConfig.queueOfflineMessages] on, a send that fails
+  /// because of the network is queued and returned as a pending message
+  /// (`isPending == true`, id `local_<clientMessageId>`) instead of
+  /// throwing; it is sent when the connection is back. Errors the server
+  /// answers (not a member, invalid message, plan limit) still throw.
   Future<Message> sendMessage(
     String roomId, {
     required String content,
@@ -248,6 +332,20 @@ class RiviumChatClient {
     String? replyToId,
   }) async {
     _checkDisposed();
+    final outbox = _outbox;
+    if (outbox != null) {
+      return outbox.send(PendingMessage(
+        clientMessageId: const Uuid().v4(),
+        roomId: roomId,
+        senderUserId: config.userId,
+        content: content,
+        type: type,
+        attachments: attachments,
+        metadata: metadata,
+        replyToId: replyToId,
+        createdAt: _now(),
+      ));
+    }
     return _api.sendMessage(
       roomId,
       senderUserId: config.userId,
@@ -258,6 +356,34 @@ class RiviumChatClient {
       replyToId: replyToId,
     );
   }
+
+  // ============ Offline outbox (queueOfflineMessages) ============
+
+  /// Messages waiting to be sent, oldest first, as pending messages
+  /// (`isPending == true`). Only [roomId]'s when given. Empty when
+  /// [RiviumChatConfig.queueOfflineMessages] is off.
+  Future<List<Message>> getPendingMessages({String? roomId}) async {
+    final outbox = _outbox;
+    if (outbox == null) return const [];
+    return (await outbox.pending(roomId: roomId)).map((p) => p.toMessage()).toList();
+  }
+
+  /// Tries to send the waiting messages now; completes when done or stopped
+  /// by the network.
+  Future<void> retryPendingMessages() async {
+    if (_isDisposed) return;
+    await _outbox?.flush();
+  }
+
+  /// Removes a waiting message ([localId] = the pending message's id) from
+  /// the queue. Emits nothing. Returns false when it is not queued (any
+  /// more); a message already being sent cannot be recalled.
+  Future<bool> cancelPendingMessage(String localId) async =>
+      await _outbox?.cancel(localId) ?? false;
+
+  /// Empties the queue, including a persistent store. Call it on sign-out
+  /// when another user may sign in on this device.
+  Future<void> clearPendingMessages() async => _outbox?.clear();
 
   /// Gets messages for a room with pagination.
   Future<PaginatedMessages> getMessages(
@@ -305,6 +431,31 @@ class RiviumChatClient {
   }) async {
     _checkDisposed();
     return _api.searchMessages(
+      roomId,
+      userId: config.userId,
+      query: query,
+      limit: limit,
+      offset: offset,
+    );
+  }
+
+  /// Searches messages in a room and reports how many match in total.
+  ///
+  /// Same search as [searchMessages]; the result also carries `total` (all
+  /// matches, not only this page) and `hasMore`.
+  ///
+  /// ```dart
+  /// final result = await client.searchMessagesWithTotal(roomId, query: 'Order #1001');
+  /// print('${result.total} matches');
+  /// ```
+  Future<SearchResult> searchMessagesWithTotal(
+    String roomId, {
+    required String query,
+    int limit = 20,
+    int offset = 0,
+  }) async {
+    _checkDisposed();
+    return _api.searchMessagesWithTotal(
       roomId,
       userId: config.userId,
       query: query,
@@ -396,6 +547,10 @@ class RiviumChatClient {
   void dispose() {
     if (_isDisposed) return;
     _isDisposed = true;
+    _connectionSub?.cancel();
+    _outbox?.dispose();
+    _messageSent.close();
+    _messageFailed.close();
     _realtime.dispose();
     _api.dispose();
     _tokens?.clear();

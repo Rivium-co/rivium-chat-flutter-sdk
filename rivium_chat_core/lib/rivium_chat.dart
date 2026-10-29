@@ -53,6 +53,11 @@ export 'src/models/message.dart';
 export 'src/models/participant.dart';
 export 'src/models/room.dart';
 export 'src/models/unread_summary.dart';
+export 'src/models/search_result.dart';
 
 // Events
 export 'src/events/events.dart';
+
+// Offline outbox
+export 'src/outbox/outbox_store.dart';
+export 'src/outbox/pending_message.dart';

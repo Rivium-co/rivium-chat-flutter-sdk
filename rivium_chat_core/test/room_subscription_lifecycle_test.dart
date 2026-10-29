@@ -20,7 +20,21 @@ class _FakeClient implements centrifuge.Client {
   /// Channels the "server" should reject, to simulate a failed subscribe.
   final Set<String> rejectChannels = {};
 
+  /// Channels the server refuses for good (code, reason), as Centrifugo does
+  /// for a user who is not a participant of the room.
+  final Map<String, (int, String)> refuseChannels = {};
+
+  int connectCalls = 0;
+
   int newSubscriptionCalls = 0;
+
+  /// The socket closes while the unsubscribe is in flight: Centrifuge then
+  /// fails it with the error *type* `ClientDisconnectedError` (not an
+  /// instance), as its transport does on close.
+  bool removeFailsDisconnected = false;
+
+  /// Channels published to, in order.
+  final List<String> published = [];
 
   final _connecting = StreamController<centrifuge.ConnectingEvent>.broadcast();
   final _connected = StreamController<centrifuge.ConnectedEvent>.broadcast();
@@ -52,13 +66,24 @@ class _FakeClient implements centrifuge.Client {
   @override
   Future<void> removeSubscription(centrifuge.Subscription subscription) async {
     registry.remove((subscription as _FakeSubscription).channel);
+    if (removeFailsDisconnected) {
+      await Future<void>.delayed(Duration.zero);
+      throw centrifuge.ClientDisconnectedError;
+    }
   }
 
   @override
-  Future<void> connect() async {}
+  Future<void> connect() async {
+    connectCalls++;
+  }
 
   @override
-  Future<void> disconnect() async {}
+  Future<void> disconnect() async {
+    // Like Centrifuge: the disconnected event is emitted while disconnect()
+    // runs, after any await the caller did before it.
+    await Future<void>.delayed(Duration.zero);
+    _disconnected.add(centrifuge.DisconnectedEvent(0, 'disconnect called'));
+  }
 
   @override
   noSuchMethod(Invocation invocation) => _unsupported(invocation);
@@ -95,6 +120,16 @@ class _FakeSubscription implements centrifuge.Subscription {
 
   @override
   Future<void> subscribe() async {
+    final refusal = _client.refuseChannels[channel];
+    if (refusal != null) {
+      // Like Centrifuge on a permanent subscribe error: the error event,
+      // then the subscription ends with the server's code and reason.
+      final (code, reason) = refusal;
+      _error.add(centrifuge.SubscriptionErrorEvent(centrifuge
+          .SubscriptionSubscribeError(centrifuge.Error.custom(code, reason, false))));
+      _unsubscribed.add(centrifuge.UnsubscribedEvent(code, reason));
+      return;
+    }
     if (_client.rejectChannels.contains(channel)) {
       // Centrifuge reports a rejected subscribe on the error stream; it does
       // not throw out of subscribe().
@@ -103,6 +138,12 @@ class _FakeSubscription implements centrifuge.Subscription {
     }
     _subscribed.add(
         centrifuge.SubscribedEvent(false, false, const <int>[], null, false, false));
+  }
+
+  @override
+  Future<centrifuge.PublishResult> publish(List<int> data) async {
+    _client.published.add(channel);
+    return centrifuge.PublishResult();
   }
 
   @override
@@ -201,5 +242,128 @@ void main() {
 
     await service.connect();
     await expectLater(service.subscribeRoom('r1'), completes);
+  });
+
+  test('disconnect while unsubscribes are in flight leaves no uncaught error', () async {
+    // dispose() / sign-out with rooms open: every channel's unsubscribe is
+    // cut off by the closing socket. flutter_test fails the test on any
+    // uncaught async error, which is what an app's crash reporter would get.
+    await service.subscribeRoom('r1');
+    fake.removeFailsDisconnected = true;
+    await service.disconnect();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(fake.registry, isEmpty);
+  });
+
+  test('dispose with rooms open leaves no uncaught error', () async {
+    // dispose() closes the event streams while the disconnect it started is
+    // still running; its late events must be dropped, not thrown.
+    await service.subscribeRoom('r1');
+    service.dispose();
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+  });
+
+  test('typing is throttled per room, not across rooms', () async {
+    await service.subscribeRoom('r1');
+    await service.subscribeRoom('r2');
+
+    await service.publishTyping('r1');
+    await service.publishTyping('r2');
+    await service.publishTyping('r1'); // within 2 s of the first: dropped
+
+    expect(fake.published, ['typing:room_r1', 'typing:room_r2']);
+  });
+
+  test('a room the server refuses is reported with its code and reason', () async {
+    fake.refuseChannels['chat:room_r1'] = (403, 'Not a participant in this room');
+    final states = <SubscriptionStateEvent>[];
+    final recovery = <String>[];
+    service.onSubscriptionState.listen(states.add);
+    service.onRecoveryFailed.listen(recovery.add);
+
+    await expectLater(service.subscribeRoom('r1'), throwsA(isA<StateError>()));
+    await Future<void>.delayed(Duration.zero);
+
+    final error = states.firstWhere((e) =>
+        e.channel == 'chat:room_r1' && e.status == SubscriptionStatus.error);
+    expect(error.code, 403);
+    expect(error.reason, 'Not a participant in this room');
+    final ended = states.firstWhere((e) =>
+        e.channel == 'chat:room_r1' && e.status == SubscriptionStatus.unsubscribed);
+    expect(ended.code, 403);
+    expect(recovery, ['r1'],
+        reason: 'the room cannot be followed: the app must reload or show the refusal');
+  });
+
+  test('a channel I unsubscribe myself is not reported as a refusal', () async {
+    final recovery = <String>[];
+    service.onRecoveryFailed.listen(recovery.add);
+    await service.subscribeRoom('r1');
+    await service.unsubscribeRoom('r1');
+    await Future<void>.delayed(Duration.zero);
+    expect(recovery, isEmpty);
+  });
+
+  test('a failing connection token sets the error state and reports it', () async {
+    final failing = RealtimeService(
+      const RiviumChatConfig(apiKey: 'k', userId: 'u'),
+      () async => throw Exception('401 unknown key'),
+      clientFactory: (_, __) => _FakeClient(),
+    );
+    final errors = <ConnectionErrorEvent>[];
+    final states = <ConnectionState>[];
+    failing.onConnectionError.listen(errors.add);
+    failing.connectionState.listen(states.add);
+
+    await expectLater(failing.connect(), throwsA(isA<Exception>()));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(failing.currentConnectionState, ConnectionState.error);
+    expect(states.last, ConnectionState.error);
+    expect(errors, hasLength(1));
+  });
+
+  test('dispose while the token is still being fetched opens no connection', () async {
+    final token = Completer<String>();
+    final late = _FakeClient();
+    var built = 0;
+    final pending = RealtimeService(
+      const RiviumChatConfig(apiKey: 'k', userId: 'u'),
+      () => token.future,
+      clientFactory: (_, __) {
+        built++;
+        return late;
+      },
+    );
+
+    final connecting = pending.connect();
+    pending.dispose();
+    token.complete('token');
+    await connecting.catchError((_) {});
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+
+    expect(built, 0, reason: 'a disposed client must not open a socket');
+    expect(late.connectCalls, 0);
+  });
+
+  test('disconnect while the token is still being fetched opens no connection', () async {
+    final token = Completer<String>();
+    var built = 0;
+    final pending = RealtimeService(
+      const RiviumChatConfig(apiKey: 'k', userId: 'u'),
+      () => token.future,
+      clientFactory: (_, __) {
+        built++;
+        return _FakeClient();
+      },
+    );
+
+    final connecting = pending.connect();
+    await pending.disconnect();
+    token.complete('token');
+    await connecting.catchError((_) {});
+
+    expect(built, 0);
+    expect(pending.currentConnectionState, ConnectionState.disconnected);
   });
 }

@@ -1,3 +1,20 @@
+## [0.2.0] - 2026-10-30
+
+- Added: offline sending, off by default. With `RiviumChatConfig(queueOfflineMessages: true)`, a message that cannot be sent because of the network (no network, timeout, server busy, `tokenProvider` unreachable) is kept and sent when the connection is back, in the order written and never twice. `sendMessage()` then returns it as a pending message (`isPending == true`, id `local_<clientMessageId>`) instead of throwing. Errors the server answers (not a member, invalid message, plan limit) still throw. Without the option nothing changes.
+- Added: `onMessageSent` (a queued message was stored) and `onMessageFailed` (it left the queue unsent, `reason` `'expired'` after 24 hours or `'rejected'` by the server), plus `getPendingMessages()`, `retryPendingMessages()`, `cancelPendingMessage()` and `clearPendingMessages()`.
+- Added: the queue is kept in memory by default; pass `outboxStore` (implement `OutboxStore` with the storage your app uses) to keep it across app restarts. No new dependency.
+- Added: `Message.clientMessageId`.
+- Fixed: `searchMessages()` no longer fails; it reads the search results the API returns.
+- Fixed: `getMentions()` no longer fails; it returns the mentioned messages.
+- Fixed: `getRoomByExternalId()` works with external ids that contain characters such as `/`, `#` or spaces.
+- Fixed: `connect()` throws an `ArgumentError` when `apiKey` or `userId` is empty, instead of every request failing later. Creating the client still never throws, so a `RiviumChatScope` built before the user is known reports the error through `onError`.
+- Fixed: when `tokenProvider` fails during `connect()`, `onAuthError` now reports `token_provider_failed`, as it already did for other calls.
+- Fixed: `publishTyping()` is throttled per room, so typing in one room no longer hides typing in another for 2 seconds.
+- Fixed: `disconnect()` and `dispose()` with rooms open no longer leave uncaught errors (`ClientDisconnectedError`, "Cannot add new events after calling close") that an app's error reporting would record on every sign-out.
+- Added: `searchMessagesWithTotal()` returns a `SearchResult` with the matching `messages`, the `total` number of matches and `hasMore`. `searchMessages()` is unchanged.
+- Fixed: a room subscription the server refuses (for example "Not a participant in this room") is now reported on `onRecoveryFailed` for the room, and the `error` event on `onSubscriptionState` carries the server's `code` and `reason`.
+- Fixed: calling `disconnect()` or `dispose()` while `connect()` was still fetching its token no longer opens a connection afterwards.
+
 ## [0.1.5] - 2026-10-05
 
 - Added: requests send an `X-Rivium-SDK` header (`flutter/<version>`); `riviumChatSdkName` and `riviumChatSdkVersion` are exported.

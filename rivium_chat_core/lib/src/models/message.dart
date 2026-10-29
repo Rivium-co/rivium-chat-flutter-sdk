@@ -27,6 +27,10 @@ class Message {
   final bool isPending;
   final bool isFailed;
 
+  /// The id the sending app gave the message (sent by the SDK when
+  /// `queueOfflineMessages` is on); matches a pending copy to the stored one.
+  final String? clientMessageId;
+
   const Message({
     required this.id,
     required this.roomId,
@@ -48,6 +52,7 @@ class Message {
     this.reactions,
     this.isPending = false,
     this.isFailed = false,
+    this.clientMessageId,
   });
 
   factory Message.fromJson(Map<String, dynamic> json) {
@@ -84,6 +89,7 @@ class Message {
           .toList(),
       isPending: json['isPending'] as bool? ?? false,
       isFailed: json['isFailed'] as bool? ?? false,
+      clientMessageId: json['clientMessageId'] as String?,
     );
   }
 
@@ -122,6 +128,7 @@ class Message {
         'reactions': reactions!.map((e) => e.toJson()).toList(),
       'isPending': isPending,
       'isFailed': isFailed,
+      if (clientMessageId != null) 'clientMessageId': clientMessageId,
     };
   }
 
@@ -146,6 +153,7 @@ class Message {
     List<Reaction>? reactions,
     bool? isPending,
     bool? isFailed,
+    String? clientMessageId,
   }) {
     return Message(
       id: id ?? this.id,
@@ -168,6 +176,7 @@ class Message {
       reactions: reactions ?? this.reactions,
       isPending: isPending ?? this.isPending,
       isFailed: isFailed ?? this.isFailed,
+      clientMessageId: clientMessageId ?? this.clientMessageId,
     );
   }
 
@@ -194,7 +203,8 @@ class Message {
         other.pinnedBy == pinnedBy &&
         listEquals(other.reactions, reactions) &&
         other.isPending == isPending &&
-        other.isFailed == isFailed;
+        other.isFailed == isFailed &&
+        other.clientMessageId == clientMessageId;
   }
 
   @override
@@ -217,7 +227,7 @@ class Message {
         pinnedAt,
         pinnedBy,
         reactions != null ? Object.hashAll(reactions!) : null,
-        Object.hash(isPending, isFailed),
+        Object.hash(isPending, isFailed, clientMessageId),
       );
 
   @override

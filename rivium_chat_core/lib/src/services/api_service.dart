@@ -1,5 +1,4 @@
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart' show visibleForTesting;
 import '../config.dart';
 import '../events/events.dart';
 import '../models/models.dart';
@@ -20,7 +19,8 @@ class ApiService {
     this._config, {
     TokenManager? tokens,
     void Function(AuthErrorEvent)? onAuthError,
-    @visibleForTesting HttpClientAdapter? httpClientAdapter,
+    /// Answers requests instead of the network; for tests.
+    HttpClientAdapter? httpClientAdapter,
   })  : _tokens = tokens,
         _onAuthError = onAuthError {
     _dio = Dio(BaseOptions(
@@ -144,7 +144,7 @@ class ApiService {
   /// Gets a room by its external ID.
   Future<Room> getRoomByExternalId(String externalId) async {
     final response =
-        await _dio.get('/api/v1/rooms/by-external-id/$externalId');
+        await _dio.get('/api/v1/rooms/by-external-id/${Uri.encodeComponent(externalId)}');
     return Room.fromJson(response.data);
   }
 
@@ -191,6 +191,7 @@ class ApiService {
     List<Attachment>? attachments,
     Map<String, dynamic>? metadata,
     String? replyToId,
+    String? clientMessageId,
   }) async {
     final response = await _dio.post('/api/v1/rooms/$roomId/messages', data: {
       'senderUserId': senderUserId,
@@ -205,6 +206,7 @@ class ApiService {
             }).toList(),
       if (metadata != null) 'metadata': metadata,
       if (replyToId != null) 'replyToId': replyToId,
+      if (clientMessageId != null) 'clientMessageId': clientMessageId,
     });
     return Message.fromJson(response.data);
   }
@@ -265,6 +267,24 @@ class ApiService {
     int limit = 20,
     int offset = 0,
   }) async {
+    final result = await searchMessagesWithTotal(
+      roomId,
+      userId: userId,
+      query: query,
+      limit: limit,
+      offset: offset,
+    );
+    return result.messages;
+  }
+
+  /// Searches messages in a room and reports how many match in total.
+  Future<SearchResult> searchMessagesWithTotal(
+    String roomId, {
+    required String userId,
+    required String query,
+    int limit = 20,
+    int offset = 0,
+  }) async {
     final response = await _dio.get('/api/v1/rooms/$roomId/messages/search',
         queryParameters: {
           'userId': userId,
@@ -272,7 +292,24 @@ class ApiService {
           'limit': limit,
           'offset': offset,
         });
-    return (response.data as List).map((e) => Message.fromJson(e)).toList();
+    return parseSearchResult(response.data, offset: offset);
+  }
+
+  /// The API answers `{ messages, total }`; a bare list is accepted too.
+  static SearchResult parseSearchResult(Object? data, {int offset = 0}) {
+    final list = data is Map ? data['messages'] : data;
+    final messages = list is List
+        ? list
+            .map((e) => Message.fromJson(Map<String, dynamic>.from(e as Map)))
+            .toList()
+        : <Message>[];
+    final rawTotal = data is Map ? data['total'] : null;
+    final total = rawTotal is num ? rawTotal.toInt() : messages.length;
+    return SearchResult(
+      messages: messages,
+      total: total,
+      hasMore: offset + messages.length < total,
+    );
   }
 
   // ============ Reaction Methods ============
@@ -354,7 +391,17 @@ class ApiService {
       'limit': limit,
       'offset': offset,
     });
-    return (response.data as List).map((e) => Message.fromJson(e)).toList();
+    // The API answers a list of mentions, each carrying the mentioned
+    // message under `message`.
+    final data = response.data;
+    if (data is! List) return [];
+    return data
+        .whereType<Map>()
+        .map((e) => e['message'] is Map ? e['message'] as Map : e)
+        // A mention whose message is gone has nothing to show.
+        .where((m) => m['senderUserId'] != null)
+        .map((m) => Message.fromJson(Map<String, dynamic>.from(m)))
+        .toList();
   }
 
   /// Gets online users in a room via the server API (no subscription needed).

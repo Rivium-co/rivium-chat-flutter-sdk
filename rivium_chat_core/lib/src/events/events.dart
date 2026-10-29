@@ -1,4 +1,5 @@
 import '../models/enums.dart';
+import '../models/message.dart';
 
 /// Event emitted when a user reads messages in a room.
 class ReadReceipt {
@@ -273,4 +274,46 @@ class AuthErrorEvent {
 
   @override
   String toString() => 'AuthErrorEvent($code: $message)';
+}
+
+/// A message queued while offline was stored by the server (only with
+/// `queueOfflineMessages`).
+///
+/// [localId] is the pending message's id (`local_<clientMessageId>`);
+/// [message] is the stored message. The live message event for it still
+/// arrives and carries the same [clientMessageId].
+class MessageSentEvent {
+  final String localId;
+  final String clientMessageId;
+  final Message message;
+
+  const MessageSentEvent({
+    required this.localId,
+    required this.clientMessageId,
+    required this.message,
+  });
+}
+
+/// A message queued while offline left the queue without being stored (only
+/// with `queueOfflineMessages`).
+///
+/// [reason] is [reasonExpired] (it waited more than 24 hours) or
+/// [reasonRejected] (the server refused it, e.g. not a member any more).
+class MessageFailedEvent {
+  static const reasonExpired = 'expired';
+  static const reasonRejected = 'rejected';
+
+  final String localId;
+  final String clientMessageId;
+  final String roomId;
+  final String error;
+  final String reason;
+
+  const MessageFailedEvent({
+    required this.localId,
+    required this.clientMessageId,
+    required this.roomId,
+    required this.error,
+    required this.reason,
+  });
 }
